@@ -7,12 +7,21 @@ export interface PluginSettings {
 const STORAGE_NAME = 'cloze-settings.json';
 
 /**
- * 不可见字符正则：覆盖半角/全角空白与换行，以及思源行内元素边界使用的
- * 零宽字符 ZWSP(\u200b)、WordJoiner(\u2060)、ZWNBSP(\ufeff)。
+ * 零宽字符正则：思源在行内元素边界写入的 ZWSP(\u200b)、WordJoiner(\u2060)、
+ * ZWNBSP(\ufeff)。它们的 Unicode 类别为 Cf，String.prototype.trim() 不会移除，
+ * 必须显式匹配，否则集群扫描会在遇到第一个零宽字符时立即中断。
  *
- * 关键：这些零宽字符的 Unicode 类别为 Cf，String.prototype.trim() 不会移除它们，
- * 因此必须显式匹配。否则集群扫描会在遇到第一个零宽字符时立即中断
- * （思源 kbd 前后必然存在 ZWSP，这是跨空格/跨公式联动失效的根本原因）。
+ * 这里刻意**不含 \s**：真实空白是可见内容，正是「两次划选＝两个遮罩」的唯一判据。
+ * 一次挖空被行内公式切成多个 kbd 切片时，切片之间只会有零宽字符——Lute 的
+ * renderKbdOpenMarker 只写 \u2060、renderKbdCloseMarker 只写 \u200b，且 kbd 内部
+ * 关闭 AutoSpace，空白一律留在切片内部（见 lute test/spin_block_test.go:186/232）。
+ * 因此「切片之间出现真实空白」必然意味着那是两个互不相干的挖空标记。
+ */
+const ZW_ONLY_TEXT = /^[\u200b\u2060\ufeff]*$/u;
+
+/**
+ * 宽松口径：连真实空白也算不可见。只用于「光标停在 kbd 紧邻的边界文本节点上」
+ * 这一处归属判定，让遮罩右侧还带一个空格时 ⌥Q 依然点入即撤。
  */
 const INVISIBLE_TEXT = /^[\s\u200b\u2060\ufeff]*$/u;
 
@@ -112,7 +121,7 @@ export default class ClozePlugin extends Plugin {
    * 「DOM 可见内容的连续性」在渲染层重建，绝不依赖任何持久化属性。
    *
    * 桥接规则（不中断扫描）：
-   *   - 不可见字符文本节点（空白 / ZWSP / WordJoiner / ZWNBSP）
+   *   - 纯零宽字符文本节点（ZWSP / WordJoiner / ZWNBSP）
    *   - WBR 换行提示元素
    * 成员规则：
    *   - kbd 元素直接入列并继续向两侧延伸；
@@ -122,9 +131,9 @@ export default class ClozePlugin extends Plugin {
    * 公式必须入列：否则悬停联动类永远加不到公式上，会出现
    * 「悬停左侧公式整簇显晓、悬停右侧 kbd 只有 kbd 显晓」的单向缺陷。
    *
-   * 断簇条件：遇到任何既非 kbd、也非桥接的可见内容立即终止——
-   * 这正是「分两次创建就是两个遮罩」的判据：两次划选之间没被选中的内容
-   * 会把这个位置切开，于是得到两个互不牵连的集群。
+   * 断簇条件：遇到任何既非 kbd、也非桥接的内容立即终止。真实空白同样算可见
+   * 内容——这正是「分两次创建就是两个遮罩」的判据：两次划选之间没被选中的
+   * 内容（哪怕只是一个空格）会把这个位置切开，于是得到两个互不牵连的集群。
    */
   private getClozeCluster(startKbd: HTMLElement): HTMLElement[] {
     if (!startKbd.closest('[data-node-id]')) return [startKbd];
@@ -137,7 +146,7 @@ export default class ClozePlugin extends Plugin {
 
     const isSkippable = (node: Node): boolean => {
       if (node.nodeType === Node.TEXT_NODE) {
-        return INVISIBLE_TEXT.test(node.textContent || '');
+        return ZW_ONLY_TEXT.test(node.textContent || '');
       }
       if (node.nodeType === Node.ELEMENT_NODE) {
         return (node as HTMLElement).tagName === 'WBR';
@@ -179,8 +188,8 @@ export default class ClozePlugin extends Plugin {
   }
 
   /**
-   * 沿兄弟节点方向扫描，跳过不可见字符文本与 WBR，返回遇到的第一个 kbd；
-   * 遇到任何其他可见内容立即终止。与 getClozeCluster 的桥接口径保持一致。
+   * 沿兄弟节点方向扫描，跳过纯零宽字符文本与 WBR，返回遇到的第一个 kbd；
+   * 遇到任何其他内容（含真实空白）立即终止。与 getClozeCluster 的桥接口径一致。
    */
   private scanAdjacentCloze(from: Node, direction: 'prev' | 'next'): HTMLElement | null {
     let curr: Node | null = from;
@@ -188,7 +197,7 @@ export default class ClozePlugin extends Plugin {
       curr = direction === 'prev' ? curr.previousSibling : curr.nextSibling;
       if (!curr) return null;
       if (curr.nodeType === Node.TEXT_NODE) {
-        if (INVISIBLE_TEXT.test(curr.textContent || '')) continue;
+        if (ZW_ONLY_TEXT.test(curr.textContent || '')) continue;
         return null;
       }
       if (curr.nodeType === Node.ELEMENT_NODE) {
