@@ -1,10 +1,10 @@
 {
-  "createCloze": "Create/Remove Inline Cloze (Toggle)",
+  "createCloze": "Create/Remove Inline Cloze (⌥Q Quick-Toggle)",
   "toggleCloze": "Toggle Cloze Visibility",
   "clozeActive": "Cloze mode activated",
   "clozeInactive": "Cloze mode deactivated",
   "clozeCreated": "Inline cloze block created",
-  "clozeRemoved": "Inline cloze mask removed",
+  "clozeRemoved": "Complete inline cloze mask removed",
   "noSelection": "Please select text or place cursor inside cloze",
   "defaultHide": "Hide Cloze by Default",
   "defaultHideDesc": "Hide all inline cloze blocks by default when opening documents"

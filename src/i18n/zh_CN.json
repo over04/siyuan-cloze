@@ -1,10 +1,10 @@
 {
-  "createCloze": "创建/取消行内挖空 (开关)",
+  "createCloze": "创建/取消行内挖空 (⌥Q 点入即撤)",
   "toggleCloze": "切换完形填空显隐",
   "clozeActive": "完形填空模式已开启",
   "clozeInactive": "完形填空模式已关闭",
   "clozeCreated": "已创建行内挖空块",
-  "clozeRemoved": "已取消行内挖空遮罩",
+  "clozeRemoved": "已取消整块行内挖空遮罩",
   "noSelection": "请先选中文本或将光标置于挖空块内",
   "defaultHide": "默认隐藏填空",
   "defaultHideDesc": "打开文档时默认遮挡所有行内挖空块"

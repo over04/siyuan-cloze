@@ -1,19 +1,18 @@
 /* ==========================================================================
-   思源笔记独立行内自定义挖空块样式表 (SiYuan Inline Cloze Block Stylesheet)
-   无损保护数学公式 KaTeX、加粗、下划线等原生富文本结构，0 损坏，0 降级
-   透明模糊遮罩 + 100% 灰度脱敏模式
-   支持组联动（同一 group 的多个切片与公式一体平滑显晓）
+   思源笔记行内挖空块样式表 (SiYuan Inline Cloze)
+   无损保护 KaTeX 公式、加粗、下划线等原生富文本结构，零降级、零污染
+   遮蔽 = 透明模糊 + 100% 灰度脱敏
    ========================================================================== */
 
 /* ==========================================================================
-   一、基础外观 (无损继承，绝不影响排版结构)
+   一、基础外观（常态编辑模式：淡点状下划线提示，一眼辨认挖空位置）
    ========================================================================== */
 
 .protyle-wysiwyg span[data-type~="kbd"],
 .b3-typography span[data-type~="kbd"] {
   background: transparent !important;
   border: none !important;
-  border-bottom: none !important;
+  border-bottom: 1.5px dashed var(--b3-theme-surface-lighter, rgba(130, 130, 130, 0.45)) !important;
   box-shadow: none !important;
   outline: none !important;
   border-radius: 2px !important;
@@ -24,45 +23,35 @@
   line-height: inherit !important;
   display: inline !important;
   vertical-align: baseline !important;
+  /* transition 必须挂在始终生效的基础规则上：遮蔽段用 :not() 反向失效，
+     过渡若写在遮蔽段里，显晓的一瞬间过渡本身也会一起消失。 */
   transition: filter 0.25s ease-in-out, opacity 0.25s ease-in-out !important;
 }
 
 /* ==========================================================================
-   二、背诵挖空遮蔽状态 (当 sy-cloze-active 激活时)
+   二、背诵遮蔽状态（与 git 2915f87 的视觉一致）
+
+   核心遮蔽：100% 灰度脱敏 + 深度毛玻璃模糊。
+
+   显晓由 JS 统一驱动：悬停或划选命中整簇时，给簇内每个成员（kbd 切片
+   与夹在中间的行内公式）都加上 .sy-cloze-reveal，本段用 :not() 反向生效，
+   于是整簇一起恢复高清真彩，不存在「悬停左边整簇亮、悬停右边只亮半边」
+   的方向性缺口。
    ========================================================================== */
 
-body.sy-cloze-active,
-.protyle-wysiwyg.sy-cloze-active,
-.b3-typography.sy-cloze-active {
-  span[data-type~="kbd"] {
-    background: transparent !important;
-    border: none !important;
-    border-bottom: none !important;
-    box-shadow: none !important;
-    outline: none !important;
-    cursor: pointer !important;
-    user-select: none !important;
+body.sy-cloze-active span[data-type~="kbd"]:not(.sy-cloze-reveal) {
+  background: transparent !important;
+  border: none !important;
+  border-bottom-color: transparent !important;
+  box-shadow: none !important;
+  outline: none !important;
+  cursor: pointer !important;
 
-    /* 核心遮蔽：100% 灰度脱敏 + 深度毛玻璃模糊 */
-    filter: blur(6px) grayscale(100%) !important;
-    opacity: 0.65 !important;
-    transition: filter 0.25s ease-in-out, opacity 0.25s ease-in-out !important;
+  /* 核心遮蔽：100% 灰度脱敏 + 深度毛玻璃模糊 */
+  filter: blur(6px) grayscale(100%) !important;
+  opacity: 0.65 !important;
+}
 
-    * {
-      transition: filter 0.25s ease-in-out, opacity 0.25s ease-in-out !important;
-    }
-
-    /* 单独悬停或同组联动悬停 (Hover / Group-Hover Reveal)：平滑透视显现真实色彩与高清 */
-    &:hover,
-    &.sy-cloze-hover-active {
-      filter: none !important;
-      opacity: 1 !important;
-      user-select: auto !important;
-
-      * {
-        filter: none !important;
-        opacity: 1 !important;
-      }
-    }
-  }
+body.sy-cloze-active span[data-type~="kbd"]:not(.sy-cloze-reveal) * {
+  transition: filter 0.25s ease-in-out, opacity 0.25s ease-in-out !important;
 }
