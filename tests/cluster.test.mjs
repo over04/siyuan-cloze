@@ -11,14 +11,12 @@
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { JSDOM } from 'jsdom';
 
 import { FIXTURES, memberLabel } from './fixtures.mjs';
-import { INVISIBLE_TEXT, KBD_SELECTOR, getClozeCluster, isClozeBridge } from '../src/cluster.ts';
+import { parseBlock, setupDom } from './helpers.mjs';
+import { INVISIBLE_TEXT, KBD_SELECTOR, ZW_ONLY_TEXT, getClozeCluster, isClozeBridge } from '../src/cluster.ts';
 
-const jsdom = new JSDOM('<!doctype html><html><body></body></html>');
-globalThis.Node = jsdom.window.Node;
-globalThis.document = jsdom.window.document;
+setupDom();
 
 /** 改前的宽松口径：把真实空白也当成不可见字符。 */
 const looseBridge = (node) => {
@@ -31,12 +29,7 @@ const looseBridge = (node) => {
   return false;
 };
 
-const parse = (html) => {
-  const block = document.createElement('div');
-  block.setAttribute('data-node-id', 'fixture');
-  block.innerHTML = html;
-  return block;
-};
+const parse = parseBlock;
 
 /** 两个成员之间那截没被任何成员覆盖的文本（成员之间只有零宽字符时为空串）。 */
 const gapText = (a, b) => {
@@ -94,6 +87,9 @@ test('桥接判据：只有纯零宽字符才是桥', () => {
 
   // 宽松口径与生产口径的唯一差别就是这一处，光标归属判定仍依赖它
   assert.equal(looseBridge(mk('\u200b \u200b')), true);
+  assert.equal(ZW_ONLY_TEXT.test('\u200b \u200b'), false);
+  assert.equal(ZW_ONLY_TEXT.test('\u200b\u2060\ufeff'), true);
+  assert.equal(INVISIBLE_TEXT.test('\u200b \u200b'), true);
 });
 
 test('kbd 选择器用 ~= 语义，不会误匹配 kbdish / kbd-span', () => {
