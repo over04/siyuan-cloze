@@ -1,0 +1,25 @@
+{
+  "name": "siyuan-cloze",
+  "author": "YG",
+  "url": "https://github.com/YG/siyuan-cloze",
+  "version": "1.0.0",
+  "minversion": "3.0.0",
+  "frontEnd": true,
+  "backEnd": false,
+  "displayName": {
+    "default": "Cloze (局部完形填空)",
+    "zh_CN": "Cloze (局部完形填空)",
+    "en_US": "Cloze"
+  },
+  "description": {
+    "default": "针对选中的公式与文字进行局部纯黄色高光挖空，Hover平滑显晓，自动桥接消灭空格留白缝隙。",
+    "zh_CN": "针对选中的公式与文字进行局部纯黄色高光挖空，Hover平滑显晓，自动桥接消灭空格留白缝隙。",
+    "en_US": "In-place selection cloze for highlighted math formulas and text with smooth hover reveal."
+  },
+  "readme": {
+    "default": "README.md",
+    "zh_CN": "README.md",
+    "en_US": "README.md"
+  },
+  "icon": "icon.png"
+}

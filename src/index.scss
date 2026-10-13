@@ -1,0 +1,68 @@
+/* ==========================================================================
+   思源笔记独立行内自定义挖空块样式表 (SiYuan Inline Cloze Block Stylesheet)
+   无损保护数学公式 KaTeX、加粗、下划线等原生富文本结构，0 损坏，0 降级
+   透明模糊遮罩 + 100% 灰度脱敏模式
+   支持组联动（同一 group 的多个切片与公式一体平滑显晓）
+   ========================================================================== */
+
+/* ==========================================================================
+   一、基础外观 (无损继承，绝不影响排版结构)
+   ========================================================================== */
+
+.protyle-wysiwyg span[data-type~="kbd"],
+.b3-typography span[data-type~="kbd"] {
+  background: transparent !important;
+  border: none !important;
+  border-bottom: none !important;
+  box-shadow: none !important;
+  outline: none !important;
+  border-radius: 2px !important;
+  margin: 0 !important;
+  padding: 0 1px !important;
+  font-family: inherit !important;
+  font-size: inherit !important;
+  line-height: inherit !important;
+  display: inline !important;
+  vertical-align: baseline !important;
+  transition: filter 0.25s ease-in-out, opacity 0.25s ease-in-out !important;
+}
+
+/* ==========================================================================
+   二、背诵挖空遮蔽状态 (当 sy-cloze-active 激活时)
+   ========================================================================== */
+
+body.sy-cloze-active,
+.protyle-wysiwyg.sy-cloze-active,
+.b3-typography.sy-cloze-active {
+  span[data-type~="kbd"] {
+    background: transparent !important;
+    border: none !important;
+    border-bottom: none !important;
+    box-shadow: none !important;
+    outline: none !important;
+    cursor: pointer !important;
+    user-select: none !important;
+
+    /* 核心遮蔽：100% 灰度脱敏 + 深度毛玻璃模糊 */
+    filter: blur(6px) grayscale(100%) !important;
+    opacity: 0.65 !important;
+    transition: filter 0.25s ease-in-out, opacity 0.25s ease-in-out !important;
+
+    * {
+      transition: filter 0.25s ease-in-out, opacity 0.25s ease-in-out !important;
+    }
+
+    /* 单独悬停或同组联动悬停 (Hover / Group-Hover Reveal)：平滑透视显现真实色彩与高清 */
+    &:hover,
+    &.sy-cloze-hover-active {
+      filter: none !important;
+      opacity: 1 !important;
+      user-select: auto !important;
+
+      * {
+        filter: none !important;
+        opacity: 1 !important;
+      }
+    }
+  }
+}
