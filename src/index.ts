@@ -8,6 +8,17 @@ import {
   resolveClozeAnchor,
   resolveElement,
 } from './cluster';
+import {
+  CELL_CONTENT_SELECTOR,
+  CELL_SELECTOR,
+  closestCellEditor,
+  createRangeByVisibleOffset,
+  getVisibleOffset,
+  isMacPlatform,
+  isRichCell,
+  matchHotkey,
+  parseHotkeyBindings,
+} from './tableCell';
 
 export interface PluginSettings {
   defaultHide: boolean;
@@ -33,6 +44,8 @@ export default class ClozePlugin extends Plugin {
   private pointerOverHandler?: (e: MouseEvent) => void;
   private pointerOutHandler?: (e: MouseEvent) => void;
   private selectionHandler?: () => void;
+  /** 单元格编辑态下的快捷键兜底监听（捕获阶段）。 */
+  private cellShortcutHandler?: (e: KeyboardEvent) => void;
 
   async onload() {
     console.log('[Cloze] Initializing SiYuan Lossless Inline Cloze Plugin...');
@@ -45,12 +58,14 @@ export default class ClozePlugin extends Plugin {
     this.initSettingsPanel();
     this.initEventBus();
     this.initRevealListeners();
+    this.initCellShortcutFallback();
 
     this.updateGlobalStyles();
   }
 
   onunload() {
     console.log('[Cloze] Unloading SiYuan Lossless Inline Cloze Plugin...');
+    this.removeCellShortcutFallback();
     this.removeRevealListeners();
     this.cleanAllClozeArtifacts();
   }
@@ -91,6 +106,54 @@ export default class ClozePlugin extends Plugin {
         this.toggleGlobalCloze();
       },
     });
+  }
+
+  /**
+   * 单元格编辑态下的快捷键兜底。
+   *
+   * 思源的编辑器快捷键分发（commonHotkey → dispatchPluginShortcut）绑在**外层**
+   * .protyle-wysiwyg 上；单元格编辑器只把键盘事件转发到 owner.element（protyle 根元素，
+   * 是 .protyle-wysiwyg 的祖先），转发事件不经过那个监听点，插件命令因此永远不会被
+   * 分发——用户按了快捷键毫无反应，连提示都没有。ProtyleLite 自身
+   * pluginExtensions: false，也不会代分发。所以这里在捕获阶段自己接管。
+   *
+   * 只在选区落在单元格编辑器内时接管；其余场景仍旧交给思源自身的命令分发，
+   * 避免同一次按键被执行两次。
+   */
+  private initCellShortcutFallback() {
+    this.cellShortcutHandler = (event: KeyboardEvent) => {
+      if (event.isComposing || event.defaultPrevented || event.repeat) return;
+
+      const selection = window.getSelection();
+      if (!selection || selection.rangeCount === 0) return;
+      if (!closestCellEditor(selection.getRangeAt(0).startContainer)) return;
+
+      if (!this.matchesClozeHotkey(event)) return;
+
+      // 拦在这里：外层本来就收不到这个事件，不会重复执行。
+      event.preventDefault();
+      event.stopPropagation();
+
+      const editor = getActiveEditor();
+      this.handleStandardClozeAction(editor ? (editor as any).protyle : null);
+    };
+
+    document.addEventListener('keydown', this.cellShortcutHandler, true);
+  }
+
+  private removeCellShortcutFallback() {
+    if (this.cellShortcutHandler) {
+      document.removeEventListener('keydown', this.cellShortcutHandler, true);
+      this.cellShortcutHandler = undefined;
+    }
+  }
+
+  /** 取用户实际绑定的快捷键（在思源设置里改过就用改过的），没有绑定则回落默认 ⌥Q。 */
+  private matchesClozeHotkey(event: KeyboardEvent): boolean {
+    const keymap = (window as any)?.siyuan?.config?.keymap?.plugin?.[this.name]?.['createCloze'];
+    const bindings = parseHotkeyBindings(keymap);
+    const list = bindings.length > 0 ? bindings : ['⌥Q'];
+    return list.some((hotkey) => matchHotkey(hotkey, event, isMacPlatform()));
   }
 
   /* ========================================================================
@@ -238,12 +301,73 @@ export default class ClozePlugin extends Plugin {
      ======================================================================== */
 
   /**
+   * 从单元格编辑态退避：先把 ProtyleLite 提交掉，再按可见文本偏移重建选区重执行。
+   *
+   * 思源在 document 捕获阶段监听 pointerdown，目标不属于编辑器时会执行其 finish()，
+   * 把 td 还原成可事务化的形态——这就是退避的着力点，不需要任何私有 API。
+   * finish 之后 td 会被重建，原 Range 必然失效，因此只能靠可见文本偏移找回选区。
+   */
+  private retreatFromCellEditor(
+    protyle: any,
+    selection: Selection,
+    range: Range,
+    cellEditor: HTMLElement,
+  ) {
+    const cell = cellEditor.closest(CELL_SELECTOR);
+    if (!cell) {
+      showMessage('未能在单元格内定位选区，请重新选择', 2000, 'info');
+      return;
+    }
+
+    // 偏移必须锚在「单元格内容区」上：编辑态的内容挂在 ProtyleLite 的 .protyle-wysiwyg 里，
+    // 退避后则由 td 直接承载。拿整个 td 去算偏移会被编辑器外壳（表格控件按钮等）的文本
+    // 带偏，恢复时必然越界——实测表现就是「选区恢复失败」。
+    const contentRoot = cellEditor.querySelector(CELL_CONTENT_SELECTOR) || cellEditor;
+    const start = getVisibleOffset(contentRoot, range.startContainer, range.startOffset);
+    const end = getVisibleOffset(contentRoot, range.endContainer, range.endOffset);
+    if (start < 0 || end < 0) {
+      showMessage('未能在单元格内定位选区，请重新选择', 2000, 'info');
+      return;
+    }
+
+    // 派发到 body：既不属于单元格编辑器，也不在外层 wysiwyg 内，
+    // 正好命中思源「目标不属于编辑器就 finish」这一条分支。
+    const PointerCtor: typeof PointerEvent =
+      typeof PointerEvent === 'function' ? PointerEvent : (MouseEvent as unknown as typeof PointerEvent);
+    document.body.dispatchEvent(new PointerCtor('pointerdown', { bubbles: true, cancelable: true }));
+
+    window.requestAnimationFrame(() => {
+      if (!cell.isConnected) {
+        showMessage('单元格已失效，请重新选择', 2000, 'info');
+        return;
+      }
+
+      // rich 形态：单元格内容已按持久化的复杂块存着，外层 setInlineMark 依然不适用。
+      // 如实告知，而不是硬闯出一次事务错误。
+      if (isRichCell(cell)) {
+        showMessage('该单元格内容较复杂，请退出单元格编辑后再按 ⌥Q', 2500, 'info');
+        return;
+      }
+
+      const restored = createRangeByVisibleOffset(cell, start, end);
+      if (!restored) {
+        showMessage('选区恢复失败，请重新选择', 2000, 'info');
+        return;
+      }
+
+      selection.removeAllRanges();
+      selection.addRange(restored);
+      this.handleStandardClozeAction(protyle, true);
+    });
+  }
+
+  /**
    * 1. 跨段落检查：禁止跨越不同 [data-node-id] 块容器；
    * 2. 光标单点一键取消：光标停在遮罩内任意位置时，自动向上捕获整个连续集群，瞬间全块取消；
    * 3. 划选选区处理：已全部覆盖则一键清除，未全部覆盖则统一打上遮罩；
    * 4. 彻底依托思源官方 AST 与 Undo 事务，零 DOM 撕碎，零格式损坏。
    */
-  private handleStandardClozeAction(protyle: any) {
+  private handleStandardClozeAction(protyle: any, isRetry = false) {
     const selection = window.getSelection();
     if (!selection || selection.rangeCount === 0) {
       showMessage(String(this.i18n.noSelection || '请先选中文本或将光标置于挖空块内'), 2000, 'info');
@@ -251,6 +375,20 @@ export default class ClozePlugin extends Plugin {
     }
 
     let range = selection.getRangeAt(0);
+
+    // 表格单元格编辑态：td 已被 openTableCellRichEditor 整体换成独立 ProtyleLite，
+    // 单元格内的块是**没有持久 ID 的临时块**。此时若继续走外层 protyle 的事务，
+    // 内核会以 block not found 拒绝并回滚——前端 DOM 看着像加上了 kbd，数据却不落库。
+    // 先退避：提交掉单元格编辑器，等 td 回到可事务化形态，再按偏移重建选区重执行。
+    const cellEditor = closestCellEditor(range.startContainer);
+    if (cellEditor) {
+      if (isRetry) {
+        showMessage('单元格仍处于编辑状态，请点击单元格外部后再按 ⌥Q', 2500, 'info');
+        return;
+      }
+      this.retreatFromCellEditor(protyle, selection, range, cellEditor);
+      return;
+    }
 
     let startNode = resolveElement(range.startContainer);
     let endNode = resolveElement(range.endContainer);
@@ -336,18 +474,18 @@ export default class ClozePlugin extends Plugin {
         selection.removeAllRanges();
         selection.addRange(expandRange);
         range = expandRange;
-
-        // 关键：思源 setInlineMark 只读 protyle.toolbar.range 这份缓存快照，
-        // 并不读取 DOM Selection，且其更新时机仅限 mouseup/keyup/input 等事件。
-        // 这里必须显式写回，否则取消操作会退化为「只取消光标所在的那一个切片」。
-        if (protyle?.toolbar) {
-          protyle.toolbar.range = expandRange;
-        }
       }
     }
 
     if (protyle && protyle.toolbar && typeof protyle.toolbar.setInlineMark === 'function') {
       try {
+        // 关键：思源 setInlineMark 只读 protyle.toolbar.range 这份缓存快照，并不读 DOM Selection；
+        // 它的更新时机仅限 mouseup/keyup/input 等事件。而表格单元格编辑器对
+        // mousedown/mouseup/click 一律 stopPropagation，外层根本收不到，于是这份快照会停在
+        // 「点开单元格那一刻的折叠光标」上。创建与取消都必须显式写回当前选区，
+        // 否则创建会静默无事发生、取消会退化为只撤掉光标所在的那一个切片。
+        protyle.toolbar.range = range.cloneRange();
+
         let currentTypes: string[] = [];
         if (typeof protyle.toolbar.getCurrentType === 'function') {
           try {
@@ -356,6 +494,7 @@ export default class ClozePlugin extends Plugin {
         }
 
         const isFullyMarked = currentTypes.includes('kbd') || Boolean(targetKbd);
+        const kbdBefore = startBlock.querySelectorAll(KBD_SELECTOR).length;
 
         // 调用思源官方原生管道执行标准化处理（等价于原生 ⌥D）。
         // 不注入任何自定义属性：Markdown 序列化只保留 kbd 的文本内容，
@@ -381,10 +520,20 @@ export default class ClozePlugin extends Plugin {
 
         this.scheduleRevealUpdate();
 
+        // 创建同样要验收：事务被内核拒绝时前端 DOM 可能毫无变化，
+        // 不校验就会谎报「已创建」。
+        const createdOk = !isFullyMarked &&
+          startBlock.querySelectorAll(KBD_SELECTOR).length > kbdBefore;
+
         let msg: string;
         let duration = 1500;
         if (!isFullyMarked) {
-          msg = String(this.i18n.clozeCreated || '已创建行内挖空块');
+          if (createdOk) {
+            msg = String(this.i18n.clozeCreated || '已创建行内挖空块');
+          } else {
+            msg = '创建未生效，请重试或把光标置于段落内再按 ⌥Q';
+            duration = 2500;
+          }
         } else if (stillMarked) {
           msg = '取消未生效，请把光标放进挖空块再按一次 ⌥Q';
           duration = 2500;

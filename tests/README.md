@@ -25,6 +25,7 @@ npm test
 | `fixtures.mjs` | 6 个场景的 DOM 夹具（真实内核往返结果）与期望分组 |
 | `cluster.test.mjs` | 集群分组、桥接判据、`kbd` 选择器语义 |
 | `anchor.test.mjs` | 锚点解析、邻居扫描、节点解析、选区求交，以及 JS↔CSS 契约 |
+| `tableCell.test.mjs` | 单元格形态判定与可见文本偏移换算（`src/tableCell.ts` 纯函数层） |
 | `helpers.mjs` | 共用件：jsdom 装配与块包装（不以 `.test.mjs` 结尾，不会被当用例执行） |
 
 `cluster.test.mjs` 用 jsdom 建真实 DOM，直接调用 `src/cluster.ts` 里的集群算法。
@@ -32,9 +33,12 @@ npm test
 `INVISIBLE_TEXT`，即改前的缺陷版本）必须得到 `wrong`——后者保证这个测试真的能抓到
 「两次划选被并成一个遮罩」这个缺陷，而不是永远绿。
 
-尚未覆盖：`src/index.ts` 里的 ⌥Q 创建/取消管道与显晓类施加——它们依赖
-`protyle.toolbar`，必须在真实编辑器里才跑得起来；`index.scss` 的遮蔽视觉也没有断言。
+尚未覆盖：`src/index.ts` 里的 ⌥Q 创建/取消管道、单元格退避流程（`retreatFromCellEditor`）
+与显晓类施加——它们依赖 `protyle.toolbar` 与真实单元格编辑器，必须在真实编辑器里才跑得起来；
+`index.scss` 的遮蔽视觉也没有断言。
 `anchor.test.mjs` 末尾的契约用例只锁住类名与选择器这两个跨文件常量。
+`tableCell.test.mjs` 覆盖 `src/tableCell.ts` 的纯函数层（形态判定、可见文本偏移往返），
+但退避流程本身（派发 pointerdown → 触发 finish → 重建选区 → 重执行）仍需真实内核验证。
 
 ## 夹具从哪来
 
