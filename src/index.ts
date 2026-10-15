@@ -15,9 +15,11 @@ import {
   UnveilStore,
   dropUnveilForBlockId,
   findClusterByKey,
+  forgetBlockOrder,
+  rememberBlockOrder,
+  replayBlockUnveil,
   replayUnveilInto,
   resetAllUnveil,
-  shouldRollback,
   toggleUnveilByKey,
   type ToggleTarget,
 } from './unveil';
@@ -43,9 +45,6 @@ const DEFAULT_SETTINGS: PluginSettings = {
   defaultHide: true,
 };
 
-/** DOM 重建后回放的节流间隔；回放只是补 class，一帧量级足够。 */
-const REPLAY_THROTTLE_MS = 16;
-
 export default class ClozePlugin extends Plugin {
   private settings: PluginSettings = { ...DEFAULT_SETTINGS };
   private isClozeActive: boolean = true;
@@ -63,15 +62,22 @@ export default class ClozePlugin extends Plugin {
    * 全程零落盘——揭晓只是本次阅读会话的临时标注，不该污染笔记数据。
    */
   private unveilStore = new UnveilStore();
-  /** DOM 重建后待回放揭晓态的 protyle 集合（定时器合并）。 */
-  private pendingUnveilRoots = new Set<HTMLElement>();
-  private unveilTimer = 0;
-  /** 刚被单击切换过的目标，供 dblclick 原样撤回。 */
-  private lastToggle?: ToggleTarget;
 
   private selectionHandler?: () => void;
-  private clickToggleHandler?: (e: MouseEvent) => void;
-  private doubleClickHandler?: (e: MouseEvent) => void;
+  private toggleDownHandler?: (e: MouseEvent) => void;
+  private swallowHandler?: (e: MouseEvent) => void;
+  /**
+   * 命中遮罩的这次交互是否还没结束。
+   *
+   * 立起来之后，紧随的 mouseup / click / dblclick 一并吞掉，直到这次交互的 click 到达才复位。
+   * 不用固定时间窗：用户按住不放超过窗口再松开时，mouseup 会漏给思源，它会收到一次没有对应
+   * mousedown 的抬起。
+   *
+   * 只拦 mousedown 是不够的：思源的编辑器还会在 mouseup / click 上更新选区快照、响应行内
+   * 公式，对它来说这次点击仍然「发生过」——点遮罩里的公式照样弹出公式编辑器。
+   * 没命中遮罩的 mousedown 会把它复位，因此不会误吞紧接着的下一次点击。
+   */
+  private swallowing = false;
   private domObserver?: MutationObserver;
   /** 单元格编辑态下的快捷键兜底监听（捕获阶段）。 */
   private cellShortcutHandler?: (e: KeyboardEvent) => void;
@@ -278,63 +284,59 @@ export default class ClozePlugin extends Plugin {
 
      捕获阶段监听：表格单元格编辑器对 mousedown/mouseup/click 一律
      stopPropagation，冒泡阶段收不到；捕获阶段先于目标处理，能拿到。
-     不调 preventDefault——光标定位、原生双击选词全部原样保留。
      ======================================================================== */
 
   /**
    * 点击揭晓。
    *
-   * 捕获阶段监听：表格单元格编辑器对 mousedown/mouseup/click 一律 stopPropagation，
-   * 冒泡阶段收不到；捕获阶段先于目标处理，能拿到。
+   * 挂在捕获阶段的 mousedown 上，不是 click。click 只在 mousedown 与 mouseup 落在同一个
+   * 目标上时才派发，而按下抬起之间抖几个像素就足以让目标变成相邻的文本——那次点击既不
+   * 切换、又已经开始了拖选，用户看到的就是「点了没反应，还变成了选择」。mousedown 在拖选
+   * 开始之前一定触发，这条路径根本不存在。
    *
-   * 遮蔽模式下，命中遮罩块的这次点击会被拦下，不再传给思源：点行内公式因此不会
-   * 弹出公式编辑器。拦的只是 click / dblclick，光标定位由 mousedown 决定，不受
-   * 影响——点完之后光标仍会落在遮罩里，想编辑就先按 ⌥X 关掉遮蔽。
+   * 命中遮罩时把整次交互吞掉，不只是 mousedown：思源还会在 mouseup / click 上更新选区
+   * 快照、响应行内公式，只拦 mousedown 的话，点遮罩里的公式照样会弹出公式编辑器。
+   * preventDefault 只能拦住浏览器自己的默认行为（选择、聚焦），拦不住思源自己的处理，
+   * 所以那几个事件得一并 stopImmediatePropagation。
    *
-   * 单击立即生效，不做任何等待。双击时第一下已经切换过，由 dblclick 原样撤回：
-   * 「双击选词复制答案」的净效果为零，而单击零延迟。
+   * 每次点击都切换，不做双击回滚：mousedown 上的 preventDefault 已经让「双击选词」不可能
+   * 发生，那个回滚分支只会让手快的人点两下等于没点。
    */
   private initClickToggle() {
-    this.clickToggleHandler = (e: MouseEvent) => {
+    this.toggleDownHandler = (e: MouseEvent) => {
       if (!this.isClozeActive) return;
       if (e.button !== 0) return;
 
       const target = this.resolveToggleTarget(e.target as Node | null);
       if (!target) {
-        // 没点中遮罩：顺手作废待撤回项，免得它跨到下一次双击里去。
-        this.lastToggle = undefined;
+        // 没点中遮罩：这次交互不归我们管，紧随的 mouseup / click 也放行。
+        this.swallowing = false;
         return;
       }
 
+      this.swallowing = true;
+
       e.preventDefault();
       e.stopImmediatePropagation();
 
-      // 双击的第二下不再切换，净效果交给 dblclick 回滚。
-      if (e.detail > 1) return;
-
+      // 每次点击都切换，不看 e.detail 的点击计数：连点两下就是切换两次。原本有个
+      // 「第二下撤回」的分支，为的是保住双击选词；但 mousedown 上的 preventDefault
+      // 早把选词一起拦掉了，那个分支已经没有存在意义，留着只会让手快的人点两下等于没点。
       this.commitToggle(target);
-      this.lastToggle = target;
     };
 
-    this.doubleClickHandler = (e: MouseEvent) => {
-      if (!this.isClozeActive) return;
-      if (e.button !== 0) return;
-
-      const pending = this.lastToggle;
-      this.lastToggle = undefined;
-      if (!pending) return;
-
-      // 只有这次双击确实落在刚才那个遮罩块上才撤回；落在别处一律放行给思源。
-      const target = this.resolveToggleTarget(e.target as Node | null);
-      if (!shouldRollback(pending, target)) return;
-
+    this.swallowHandler = (e: MouseEvent) => {
+      if (!this.swallowing) return;
+      // mouseup 只吞不复位：这次交互的 click 紧随其后，标记留到那时再清。
+      if (e.type !== 'mouseup') this.swallowing = false;
       e.preventDefault();
       e.stopImmediatePropagation();
-      this.commitToggle(pending);
     };
 
-    document.addEventListener('click', this.clickToggleHandler, true);
-    document.addEventListener('dblclick', this.doubleClickHandler, true);
+    document.addEventListener('mousedown', this.toggleDownHandler, true);
+    document.addEventListener('mouseup', this.swallowHandler, true);
+    document.addEventListener('click', this.swallowHandler, true);
+    document.addEventListener('dblclick', this.swallowHandler, true);
   }
 
   /** 把命中的簇解析成可跨重建定位的目标：只留根元素、块 ID 与标识。 */
@@ -348,38 +350,67 @@ export default class ClozePlugin extends Plugin {
     if (!block || !root || !nodeId) return null;
 
     const key = getClusterKey(block, getClozeCluster(anchor));
-    return key ? { root, nodeId, key } : null;
+    return key ? { root, nodeId, key, anchor } : null;
   }
 
   /**
    * 真正执行切换。
    *
-   * 刻意不依赖点击那一刻的元素引用：按块 ID 与答案文本在当前 DOM 里重找簇。
-   * 思源在放置光标时可能重建该块 DOM，若沿用旧引用，这次点击会被静默丢弃，
-   * 用户只看到「点了没反应」。
+   * 不按块 ID 在根里 querySelector：同一个块 ID 在 protyle 根里可能同时存在多个元素
+   * （实测 3 个），第一个未必是含遮罩的那份，会算出一个空簇，这次点击被静默丢掉——表现
+   * 正是「点了没反应」。列表项与普通段落踩不踩得到这个坑，取决于那些副本的先后顺序。
+   *
+   * 顺序：点击时的那个遮罩元素若还在文档里，用它解析最可信；它被思源重建掉之后，才退回
+   * 按块 ID 与答案文本在当前 DOM 里重找，并且逐个同 ID 元素试。
    */
   private commitToggle(target: ToggleTarget) {
     if (!this.isClozeActive) return;
     if (!target.root.isConnected) return;
 
-    const block = target.root.querySelector(`[data-node-id="${target.nodeId}"]`);
-    if (!block) return;
+    // 一级：点击时的锚点还在文档里、且仍属于这个 root，用它解析最可信。
+    // 归属校验不能省：块被移到另一个编辑器时锚点依然 isConnected，只用它会让记录写进旧 root，
+    // 新 root 的下一次回放读到空记录，把刚点亮的遮罩又清掉——看着就是「亮一下又灭」。
+    if (target.anchor.isConnected && target.root.contains(target.anchor)) {
+      const block = target.anchor.closest('[data-node-id]');
+      const cluster = getClozeCluster(target.anchor);
+      const key = block ? getClusterKey(block, cluster) : null;
+      if (block && key) {
+        this.applyToggle(target.root, block, key, cluster);
+        return;
+      }
+    }
 
-    const cluster = findClusterByKey(block, target.key);
-    if (!cluster) return;
+    const candidates = Array.from(
+      target.root.querySelectorAll(`[data-node-id="${target.nodeId}"]`),
+    );
+    for (const block of candidates) {
+      const cluster = findClusterByKey(block, target.key);
+      if (cluster) {
+        this.applyToggle(target.root, block, target.key, cluster);
+        return;
+      }
+    }
+  }
 
-    toggleUnveilByKey(this.unveilStore.ensure(target.root), target.key, cluster);
+  private applyToggle(root: HTMLElement, block: Element, key: string, cluster: HTMLElement[]) {
+    toggleUnveilByKey(this.unveilStore.ensure(root), key, cluster);
+    // 记下这一刻的簇顺序：用户可能紧接着就在簇内改字，那时还没有任何 DOM 变更触发过
+    // 回放，位置对齐要靠这份顺序才认得出「还是同一个遮罩」。
+    rememberBlockOrder(this.unveilStore, block);
   }
 
   private removeClickToggle() {
-    this.lastToggle = undefined;
-    if (this.clickToggleHandler) {
-      document.removeEventListener('click', this.clickToggleHandler, true);
-      this.clickToggleHandler = undefined;
+    // 监听摘掉之后这个标记留着没有意义，顺手复位。
+    this.swallowing = false;
+    if (this.toggleDownHandler) {
+      document.removeEventListener('mousedown', this.toggleDownHandler, true);
+      this.toggleDownHandler = undefined;
     }
-    if (this.doubleClickHandler) {
-      document.removeEventListener('dblclick', this.doubleClickHandler, true);
-      this.doubleClickHandler = undefined;
+    if (this.swallowHandler) {
+      document.removeEventListener('mouseup', this.swallowHandler, true);
+      document.removeEventListener('click', this.swallowHandler, true);
+      document.removeEventListener('dblclick', this.swallowHandler, true);
+      this.swallowHandler = undefined;
     }
   }
 
@@ -387,23 +418,40 @@ export default class ClozePlugin extends Plugin {
      三、揭晓态保活
 
      揭晓写在 DOM 的 class 上，而思源会因编辑事务、页签切换重建块 DOM。
-     观察 childList 变化、按 protyle 收敛后合并回放，揭晓因此不丢。
+     观察 childList 变化、对受影响的块就地回放，揭晓因此不丢。
      只观察 childList：class 改动属 attributes，不会被自身回放再次触发。
 
-     调度用 setTimeout 而非 rAF：标签页不可见时浏览器会暂停 rAF，而期间
-     （例如后台关文档）累积的变更会让调度一直短路，回放停摆到页面重新可见。
+     回放同步执行，不用定时器合并：思源重建块时新的 kbd 元素不带揭晓类，
+     而 MutationObserver 的回调跑在微任务里、早于浏览器绘制——同步补类，用户看不到
+     中间态。改成 setTimeout 会把落差推到下一帧之后，表现正是「每输入一个字，
+     揭晓态闪一下」。
+
+     只处理本次变更涉及的块，不扫全篇：文档里绝大多数块都没有揭晓记录，
+     单块回放在记录为空时一次 closest 就早退。
      ======================================================================== */
 
   private initDomObserver() {
     this.domObserver = new MutationObserver((records) => {
+      const blocks = new Set<Element>();
+
       records.forEach((record) => {
         const target = record.target.nodeType === Node.ELEMENT_NODE
           ? (record.target as HTMLElement)
           : record.target.parentElement;
-        const root = resolveProtyleRoot(target);
-        if (root) this.pendingUnveilRoots.add(root);
+
+        const host = target?.closest('[data-node-id]');
+        if (host) blocks.add(host);
+
+        // 块被整体替换时，新块挂在父容器的 addedNodes 上，record.target 并不是它。
+        record.addedNodes.forEach((node) => {
+          if (node.nodeType !== Node.ELEMENT_NODE) return;
+          const el = node as Element;
+          if (el.matches('[data-node-id]')) blocks.add(el);
+          el.querySelectorAll('[data-node-id]').forEach((child) => blocks.add(child));
+        });
       });
-      this.scheduleUnveilReplay();
+
+      blocks.forEach((block) => replayBlockUnveil(this.unveilStore, block));
     });
 
     this.domObserver.observe(document.body, { childList: true, subtree: true });
@@ -414,21 +462,6 @@ export default class ClozePlugin extends Plugin {
       this.domObserver.disconnect();
       this.domObserver = undefined;
     }
-    if (this.unveilTimer) {
-      window.clearTimeout(this.unveilTimer);
-      this.unveilTimer = 0;
-    }
-    this.pendingUnveilRoots.clear();
-  }
-
-  private scheduleUnveilReplay() {
-    if (this.unveilTimer) return;
-    this.unveilTimer = window.setTimeout(() => {
-      this.unveilTimer = 0;
-      const roots = Array.from(this.pendingUnveilRoots);
-      this.pendingUnveilRoots.clear();
-      roots.forEach((root) => replayUnveilInto(this.unveilStore, root));
-    }, REPLAY_THROTTLE_MS);
   }
 
   /* ========================================================================
@@ -695,18 +728,18 @@ export default class ClozePlugin extends Plugin {
           stillMarked = cluster.some((el) => el.isConnected && el.matches(KBD_SELECTOR));
         }
 
-        if (!isFullyMarked && !this.isClozeActive) {
-          this.isClozeActive = true;
-          this.updateTopBarState();
-          this.updateGlobalStyles();
-        }
-
         this.scheduleRevealUpdate();
 
         // 创建同样要验收：事务被内核拒绝时前端 DOM 可能毫无变化，
         // 不校验就会谎报「已创建」。
         const createdOk = !isFullyMarked &&
           startBlock.querySelectorAll(KBD_SELECTOR).length > kbdBefore;
+
+        if (createdOk) {
+          // 块里多了一个遮罩，上一轮的簇顺序不再对应「同一个位置还是同一个遮罩」，
+          // 基线就此作废；下一次回放结束时会自然重建。
+          forgetBlockOrder(this.unveilStore, unveilRoot, blockNodeId);
+        }
 
         let msg: string;
         let duration = 1500;
@@ -745,8 +778,10 @@ export default class ClozePlugin extends Plugin {
      ======================================================================== */
 
   private toggleGlobalCloze() {
-    // 全局重置时把待撤回项一并作废：否则用户接着在正文里双击，会把刚清掉的块又翻回来。
-    this.lastToggle = undefined;
+    // 关遮蔽之后 toggleDownHandler 会早退、不再复位吞事件标记，这里主动清一次：否则
+    // 「命中遮罩后 click 丢失（拖选、鼠标移出窗口）→ 关遮蔽」之后，关遮蔽后的第一次
+    // 点击的 mouseup / click 会被吞掉，看着像点了没反应。
+    this.swallowing = false;
     resetAllUnveil(this.unveilStore, document);
 
     this.isClozeActive = !this.isClozeActive;

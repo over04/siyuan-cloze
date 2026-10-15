@@ -227,7 +227,7 @@ export const resolveProtyleRoot = (node: Node | null): HTMLElement | null => {
  * data-content 由思源按 Markdown 源码写出，DOM 重建后必然一致；kbd 文本切片没有
  * 这个属性，回落到 textContent。
  */
-const memberFingerprint = (el: HTMLElement): string => {
+const memberText = (el: HTMLElement): string => {
   const raw = el.getAttribute('data-content') || el.textContent || '';
   return raw.replace(/[\u200b\u2060\ufeff]/g, '').trim();
 };
@@ -236,6 +236,10 @@ const memberFingerprint = (el: HTMLElement): string => {
 export interface BlockCluster {
   cluster: HTMLElement[];
   key: string;
+  /** 簇内全部成员的文本按序拼接。簇内文本被编辑后，靠它认出「还是那一个」。 */
+  text: string;
+  /** 同一段答案文本在块内出现的次序，用于区分文字完全相同的多个遮罩。 */
+  dup: number;
 }
 
 /**
@@ -258,8 +262,8 @@ export interface BlockCluster {
  * 不会插进同一组里）。
  *
  * 键只由页面上看得见的内容推导，不往笔记里写任何属性，与「不落盘、不改动
- * 笔记数据」的要求一致。簇内文本被编辑后答案文本会变，该簇的揭晓状态随之丢失
- * ——这只少记一次揭晓，不会把答案显示到别的遮罩上。
+ * 笔记数据」的要求一致。簇内文本被编辑后键会跟着变，回放靠答案文本与块内位置
+ * 重新对上号（见 unveil.ts 的两级对齐），所以编辑遮罩内容不会把揭晓态丢掉。
  */
 export const listBlockClusters = (block: Element): BlockCluster[] => {
   const nodeId = block.getAttribute('data-node-id');
@@ -277,11 +281,11 @@ export const listBlockClusters = (block: Element): BlockCluster[] => {
     const cluster = getClozeCluster(kbd);
     cluster.forEach((el) => handled.add(el));
 
-    const fingerprint = cluster.map(memberFingerprint).join('|');
-    const dup = duplicates.get(fingerprint) || 0;
-    duplicates.set(fingerprint, dup + 1);
+    const text = cluster.map(memberText).join('|');
+    const dup = duplicates.get(text) || 0;
+    duplicates.set(text, dup + 1);
 
-    out.push({ cluster, key: `${nodeId}#${fingerprint}@${dup}` });
+    out.push({ cluster, key: `${nodeId}#${text}@${dup}`, text, dup });
   }
 
   return out;
@@ -298,4 +302,30 @@ export const getClusterKey = (block: Element | null, cluster: HTMLElement[]): st
 
   const found = listBlockClusters(block).find((item) => item.cluster[0] === cluster[0]);
   return found ? found.key : null;
+};
+
+/** 揭晓键的组成部分，格式与 listBlockClusters 的产出严格对应。 */
+export interface ClusterKeyParts {
+  nodeId: string;
+  text: string;
+  dup: number;
+}
+
+/**
+ * 拆解揭晓键，取出块 ID、答案文本与重复序号。
+ *
+ * 回放需要从记录里反查答案文本——记录只有键，簇本身早已被思源重建掉了。
+ * 答案文本里可能含 `#` 或 `@`，所以块 ID 取第一个 `#` 之前、序号取最后一个 `@` 之后。
+ */
+export const parseClusterKey = (key: string): ClusterKeyParts => {
+  const hash = key.indexOf('#');
+  const at = key.lastIndexOf('@');
+
+  if (hash <= 0 || at <= hash) return { nodeId: '', text: '', dup: 0 };
+
+  return {
+    nodeId: key.slice(0, hash),
+    text: key.slice(hash + 1, at),
+    dup: Number(key.slice(at + 1)) || 0,
+  };
 };

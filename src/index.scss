@@ -12,7 +12,14 @@
 .b3-typography span[data-type~="kbd"] {
   background: transparent !important;
   border: none !important;
-  border-bottom: 1.5px dashed var(--b3-theme-surface-lighter, rgba(130, 130, 130, 0.45)) !important;
+  /* 常态提示线用 text-decoration 而不是 border-bottom：border 围的是行盒，而行盒高度
+     只跟文字的 line-height 走——遮罩里嵌了矩阵这类很高的行内公式时，线会从公式中间
+     横穿过去。text-decoration 沿着文字的基线走，公式再高也不受影响。 */
+  text-decoration-line: underline !important;
+  text-decoration-style: dashed !important;
+  text-decoration-color: var(--b3-theme-primary, rgba(130, 130, 130, 0.85)) !important;
+  text-decoration-thickness: 2px !important;
+  text-underline-offset: 3px !important;
   box-shadow: none !important;
   outline: none !important;
   border-radius: 2px !important;
@@ -23,9 +30,18 @@
   line-height: inherit !important;
   display: inline !important;
   vertical-align: baseline !important;
-  /* transition 必须挂在始终生效的基础规则上：遮蔽段用 :not() 反向失效，
-     过渡若写在遮蔽段里，显晓的一瞬间过渡本身也会一起消失。 */
-  transition: filter 0.25s ease-in-out, opacity 0.25s ease-in-out !important;
+  /* 这里刻意不写 transition：思源重建块 DOM 之后，新的 kbd 元素不带揭晓类，
+     回放给它补类时若带过渡，就成了「从模糊渐变到清晰」的一段动画，输入时看着
+     就是闪一下。过渡改由 .sy-cloze-animating 门控，只在用户主动切换时挂上
+     （见文件末尾与 unveil.ts 的 animateCluster）。 */
+}
+
+/* text-decoration 会传播进所有非原子行内级的后代，而 KaTeX 渲染出来是一串普通 span，
+   不钉住的话提示线照样横穿公式。行内公式本来就是原子行内级，显式钉成 inline-block
+   不会改变它自身的排版。 */
+.protyle-wysiwyg span[data-type~="kbd"] span[data-type~="inline-math"],
+.b3-typography span[data-type~="kbd"] span[data-type~="inline-math"] {
+  display: inline-block !important;
 }
 
 /* 手型光标只在遮蔽开启时出现，提示「这里可以点」。写在独立的、不含 :not() 的
@@ -53,15 +69,44 @@ body.sy-cloze-active span[data-type~="kbd"] {
 body.sy-cloze-active span[data-type~="kbd"]:not(.sy-cloze-reveal):not(.sy-cloze-unveiled) {
   background: transparent !important;
   border: none !important;
-  border-bottom-color: transparent !important;
   box-shadow: none !important;
   outline: none !important;
 
   /* 核心遮蔽：100% 灰度脱敏 + 深度毛玻璃模糊 */
   filter: blur(6px) grayscale(100%) !important;
   opacity: 0.65 !important;
+
+  /* 给下面那个外扩命中区的伪元素留一个定位参照。 */
+  position: relative !important;
+
+  /* 遮蔽态把提示线一起藏掉。 */
+  text-decoration-color: transparent !important;
 }
 
-body.sy-cloze-active span[data-type~="kbd"]:not(.sy-cloze-reveal):not(.sy-cloze-unveiled) * {
+/* 遮蔽态的命中区外扩。
+   blur(6px) 让模糊块看起来比实际宽出一圈，而 kbd 的 padding 只有 1px——用户照着模糊
+   的边缘点下去，实际落在相邻文本上，命中判定收不到，这次点击等于没发生。
+   伪元素绝对定位、不参与排版，点击落在它身上时事件目标仍是宿主 kbd，判定照旧。 */
+body.sy-cloze-active span[data-type~="kbd"]:not(.sy-cloze-reveal):not(.sy-cloze-unveiled)::after {
+  content: '' !important;
+  position: absolute !important;
+  left: -6px !important;
+  right: -6px !important;
+  top: -0.4em !important;
+  bottom: -0.4em !important;
+  background: transparent !important;
+  pointer-events: auto !important;
+}
+
+/* ==========================================================================
+   三、过渡：只在用户主动切换时生效
+
+   点击揭晓、⌥X 全局切换时，JS 会给受影响的 kbd 挂上 .sy-cloze-animating，
+   一小段后自动摘掉（unveil.ts 的 animateCluster）。回放补类不带它，因此思源
+   重建 DOM 不会产生任何可见动画——那正是「每输入一次闪一下」的来源。
+   ========================================================================== */
+
+span[data-type~="kbd"].sy-cloze-animating,
+span[data-type~="kbd"].sy-cloze-animating * {
   transition: filter 0.25s ease-in-out, opacity 0.25s ease-in-out !important;
 }

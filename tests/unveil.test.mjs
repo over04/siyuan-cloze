@@ -6,7 +6,7 @@
  *      同答案文本撞键由末尾序号消歧；
  *   2. 记录与回放——点击切换整簇、DOM 重建后回放、关文档（drop）后恢复默认遮蔽、
  *      失效记录核对；
- *   3. 单击确认——双击窗口、连点不吞击、跨重建定位；
+ *   3. 点击确认——每次点击都切换、连点不吞击、跨重建定位；
  *   4. JS 与 SCSS 的契约。
  */
 import { test } from 'node:test';
@@ -23,16 +23,22 @@ import {
   getClozeCluster,
   getClusterKey,
   listBlockClusters,
+  parseClusterKey,
   resolveProtyleRoot,
 } from '../src/cluster.ts';
 import {
+  ANIMATE_CLASS,
+  HIDING_CLASS,
   UnveilStore,
   dropBlockUnveil,
   dropUnveilForBlockId,
   findClusterByKey,
+  forgetBlockOrder,
+  isSameCluster,
+  rememberBlockOrder,
+  replayBlockUnveil,
   replayUnveilInto,
   resetAllUnveil,
-  shouldRollback,
   toggleClusterUnveil,
   toggleUnveilByKey,
 } from '../src/unveil.ts';
@@ -74,6 +80,19 @@ const mountProtyle = (nodeId, html) => {
 
 const unveiledCount = (scope) => scope.querySelectorAll(`.${UNVEIL_CLASS}`).length;
 
+/**
+ * 模拟一次真实点击：整簇切换，并记下这一刻的簇顺序。
+ *
+ * src/index.ts 的 commitToggle 就是这两步。回放的位置对齐要靠那份顺序才认得出
+ * 「位置 i 上的还是同一个遮罩」，所以凡是要验证「编辑后揭晓态保持」的用例都得走这条路径。
+ */
+const clickUnveil = (store, protyle, block, kbdEl) => {
+  const cluster = getClozeCluster(kbdEl);
+  const key = getClusterKey(block, cluster);
+  toggleUnveilByKey(store.ensure(protyle), key, cluster);
+  rememberBlockOrder(store, block);
+};
+
 /* ---------------------------------------------------------------- 键稳定性 */
 
 test('listBlockClusters：键 = 块ID#答案文本@同答案文本序号', () => {
@@ -107,6 +126,40 @@ test('listBlockClusters：同块内重复答案靠序号消歧，不得共用一
   toggleClusterUnveil(records, block, items[1].cluster);
   assert.equal(records.size, 2, '两个重复答案必须各自记录');
   assert.equal(unveiledCount(block), 2);
+});
+
+test('listBlockClusters：同时给出供对齐使用的 text 与 dup', () => {
+  const block = blockWith('blk', kbd('甲') + ' ' + kbd('甲') + ' ' + kbd('乙'));
+  const items = listBlockClusters(block);
+
+  assert.deepEqual(items.map((item) => item.text), ['甲', '甲', '乙']);
+  assert.deepEqual(items.map((item) => item.dup), [0, 1, 0]);
+});
+
+test('parseClusterKey：与 listBlockClusters 的键格式严格对应', () => {
+  // 答案文本里带 @ 也不能把序号切错。
+  const block = blockWith('blk', maskedMath('a@b') + kbd('乙'));
+  const [item] = listBlockClusters(block);
+
+  assert.equal(item.key, 'blk#a@b|乙@0');
+  assert.deepEqual(parseClusterKey(item.key), { nodeId: 'blk', text: 'a@b|乙', dup: 0 });
+  assert.deepEqual(parseClusterKey('garbage'), { nodeId: '', text: '', dup: 0 }, '不成形的键不得抛错');
+});
+
+test('isSameCluster：任意位置的增删改都算同一个簇', () => {
+  assert.equal(isSameCluster('1234', '123'), true, '删末尾');
+  assert.equal(isSameCluster('123', '1234'), true, '补末尾');
+  assert.equal(isSameCluster('(1234)', '(123)'), true, '删末尾，首尾同时变了');
+  assert.equal(isSameCluster('abcd', 'abd'), true, '删中间');
+  assert.equal(isSameCluster('ab', 'ax'), true, '改掉一个字符');
+  assert.equal(isSameCluster('1234', '1243'), true, '调换顺序');
+
+  assert.equal(isSameCluster('', '1234'), true, '重建中间态：文本暂时为空');
+  assert.equal(isSameCluster('1234', ''), true);
+
+  assert.equal(isSameCluster('甲', '乙'), false, '毫无关系');
+  assert.equal(isSameCluster('1234', '5678'), false);
+  assert.equal(isSameCluster('甲', '甲乙丙丁'), false, '只沾一点边，相似度不够');
 });
 
 test('getClusterKey：同块内新建遮罩不得改变已有簇的键（序号位移回归）', () => {
@@ -365,6 +418,74 @@ test('replayUnveilInto：重复答案被删掉一个时整块作废，不把揭�
   assert.equal(unveiledCount(protyle), 0, '不得把答案亮到另一个同文本遮罩上');
 });
 
+test('replayUnveilInto：把重复答案中的一个改成别的文本，两个都保持揭晓', () => {
+  const store = new UnveilStore();
+  const { protyle, block } = mountProtyle('blk', kbd('甲') + ' ' + kbd('甲'));
+
+  clickUnveil(store, protyle, block, kbdsOf(block)[0]);
+  clickUnveil(store, protyle, block, kbdsOf(block)[1]);
+  assert.equal(unveiledCount(block), 2);
+
+  // 「甲」→「甲乙」：重复计数下降了，但块内簇数没变，位置也没有前移，两个位置各自
+  // 认领自己的记录。位置级必须先于精确级走，否则另一个同文本遮罩的序号前移后会把
+  // 第一条记录抢走，改过字的这个反被熄灭。
+  block.innerHTML = kbd('甲乙') + ' ' + kbd('甲');
+  replayUnveilInto(store, protyle);
+
+  assert.equal(unveiledCount(block), 2, '两个都该保持揭晓');
+  assert.equal(store.peek(protyle).has('blk#甲乙@0'), true);
+  assert.equal(store.peek(protyle).has('blk#甲@0'), true);
+});
+
+test('replayUnveilInto：改掉一个重复答案不得把用户正看着的那个也熄灭', () => {
+  const store = new UnveilStore();
+  const { protyle, block } = mountProtyle('blk', kbd('甲') + ' ' + kbd('乙') + ' ' + kbd('乙'));
+
+  // 只揭晓中间那个「乙」。
+  clickUnveil(store, protyle, block, kbdsOf(block)[1]);
+
+  // 把末尾的「乙」改成「乙乙」：重复计数从 2 降到 1，但块内簇数没变，位置没有前移，
+  // 绝不能按「删掉一个重复答案」处理——那会把用户正看着的那个也一起熄灭。
+  block.innerHTML = kbd('甲') + ' ' + kbd('乙') + ' ' + kbd('乙乙');
+  replayUnveilInto(store, protyle);
+
+  assert.ok(kbdsOf(block)[1].classList.contains(UNVEIL_CLASS), '正看着的那个必须留着');
+  assert.ok(!kbdsOf(block)[0].classList.contains(UNVEIL_CLASS));
+  assert.ok(!kbdsOf(block)[2].classList.contains(UNVEIL_CLASS));
+});
+
+test('replayUnveilInto：删掉一个重复答案时只作废该文本，同块其它簇不受牵连', () => {
+  const store = new UnveilStore();
+  const { protyle, block } = mountProtyle('blk', kbd('甲') + ' ' + kbd('甲') + ' ' + kbd('乙'));
+
+  // 只揭晓「乙」。
+  clickUnveil(store, protyle, block, kbdsOf(block)[2]);
+
+  // 删掉一个「甲」：重复文本的计数下降、序号前移，「甲」的记录一律作废；
+  // 但「乙」与它无关，必须原样留着。
+  block.innerHTML = kbd('甲') + ' ' + kbd('乙');
+  replayUnveilInto(store, protyle);
+
+  assert.ok(kbdsOf(block)[1].classList.contains(UNVEIL_CLASS), '「乙」的揭晓态不得被牵连');
+  assert.ok(!kbdsOf(block)[0].classList.contains(UNVEIL_CLASS));
+});
+
+test('forgetBlockOrder：丢掉基线后，同位置的相似新遮罩不得继承旧记录', () => {
+  const store = new UnveilStore();
+  const { protyle, block } = mountProtyle('blk', kbd('甲') + ' ' + kbd('乙'));
+
+  clickUnveil(store, protyle, block, kbdsOf(block)[0]);
+
+  // 取消遮罩（等价于原生 ⌥D）之后又在原位置挖空一段相似文本。位置级认不出这两者的
+  // 差别，所以 ⌥Q 路径会主动丢掉基线，下一次回放只做精确匹配。
+  forgetBlockOrder(store, protyle, 'blk');
+  block.innerHTML = kbd('甲子') + ' ' + kbd('乙');
+  replayUnveilInto(store, protyle);
+
+  assert.ok(!kbdsOf(block)[0].classList.contains(UNVEIL_CLASS), '新遮罩从未被点开，不得亮起');
+  assert.ok(!kbdsOf(block)[1].classList.contains(UNVEIL_CLASS));
+});
+
 test('replayUnveilInto：无重复答案文本的块里改文本只清该簇，不牵连同块其它簇', () => {
   const store = new UnveilStore();
   const { protyle, block } = mountProtyle('blk', kbd('甲') + ' ' + kbd('乙'));
@@ -384,6 +505,206 @@ test('replayUnveilInto：无重复答案文本的块里改文本只清该簇，�
   assert.equal(records.size, 1, '只有被改掉的那一簇作废');
   assert.equal(unveiledCount(protyle), 1);
   assert.ok(kbdsOf(block)[1].classList.contains(UNVEIL_CLASS), '同块其它簇不得被牵连');
+});
+
+/* -------------------------------------------- 编辑遮罩内容：两级对齐 */
+
+test('replayUnveilInto：簇内删字后揭晓态必须保持（位置级对齐）', () => {
+  const store = new UnveilStore();
+  const { protyle, wysiwyg, block } = mountProtyle('blk', kbd('1234'));
+  const records = store.ensure(protyle);
+
+  clickUnveil(store, protyle, block, kbdsOf(block)[0]);
+  assert.equal(unveiledCount(wysiwyg), 1);
+  assert.equal(records.has('blk#1234@0'), true);
+
+  // 点开答案后删掉其中一个字：键从 blk#1234@0 变成 blk#123@0。
+  // 只按文本精确匹配的话，回放会判定为「记录里没有」而把揭晓类摘掉，
+  // 用户看到的就是「删一个字，答案又藏回去了」。
+  block.innerHTML = kbd('123');
+  replayUnveilInto(store, protyle);
+
+  assert.ok(kbdsOf(block)[0].classList.contains(UNVEIL_CLASS), '删字后必须仍是揭晓态');
+  assert.equal(records.has('blk#123@0'), true, '记录要迁到新键上，否则下一轮又得重走位置级');
+  assert.equal(records.size, 1, '旧键必须一并撤掉，不得留下两条记录');
+
+  replayUnveilInto(store, protyle);
+  assert.ok(kbdsOf(block)[0].classList.contains(UNVEIL_CLASS), '再回放一轮仍然稳定');
+  assert.equal(records.size, 1);
+});
+
+test('replayUnveilInto：删中间字符、改字符、连括号一起变，揭晓态都要保持', () => {
+  const cases = [
+    ['abcd', 'abd', '删中间'],
+    ['ab', 'ax', '改一个字符'],
+    ['(1234)', '(123)', '删末尾，首尾同时变了'],
+    ['1234', '12345', '补末尾'],
+  ];
+
+  cases.forEach(([before, after, label]) => {
+    const store = new UnveilStore();
+    const { protyle, block } = mountProtyle('blk', kbd(before));
+
+    clickUnveil(store, protyle, block, kbdsOf(block)[0]);
+
+    block.innerHTML = kbd(after);
+    replayUnveilInto(store, protyle);
+
+    assert.ok(
+      kbdsOf(block)[0].classList.contains(UNVEIL_CLASS),
+      `${label}：${before} → ${after} 必须仍是揭晓态`,
+    );
+    assert.equal(store.peek(protyle).has(`blk#${after}@0`), true, `${label}：记录要迁到新键上`);
+  });
+});
+
+test('replayUnveilInto：重建中间态文本为空时保持揭晓，且不据此改写记录', () => {
+  const store = new UnveilStore();
+  const { protyle, block } = mountProtyle('blk', kbd('12345'));
+  const records = store.ensure(protyle);
+
+  clickUnveil(store, protyle, block, kbdsOf(block)[0]);
+
+  // 思源重建行内元素：kbd 元素已经挂回 DOM，内部文本尚未填回。这一轮是按位置硬配的，
+  // 可靠性不足，因此只继承显示、不动记录——否则一次短暂的错配就会变成永久错位。
+  block.innerHTML = kbd('');
+  replayUnveilInto(store, protyle);
+
+  assert.ok(kbdsOf(block)[0].classList.contains(UNVEIL_CLASS), '中间态不得把揭晓态摘掉');
+  assert.equal(records.has('blk#12345@0'), true, '中间态的匹配不得改写记录');
+
+  block.innerHTML = kbd('12345');
+  replayUnveilInto(store, protyle);
+
+  assert.equal(records.size, 1);
+  assert.ok(kbdsOf(block)[0].classList.contains(UNVEIL_CLASS), '文本填回后仍然揭晓');
+});
+
+test('replayUnveilInto：位置级只认领同一个位置上的记录，不得抢走别的簇的揭晓态', () => {
+  const store = new UnveilStore();
+  const { protyle, block } = mountProtyle('blk', kbd('甲') + ' ' + kbd('乙'));
+  const records = store.ensure(protyle);
+  const items = listBlockClusters(block);
+
+  // 只点开第二个。
+  toggleClusterUnveil(records, block, items[1].cluster);
+  replayUnveilInto(store, protyle);
+  assert.ok(kbdsOf(block)[1].classList.contains(UNVEIL_CLASS));
+
+  // 把第一个簇改成一个与「乙」毫无关系的字：它不得因此抢到「乙」的记录。
+  block.innerHTML = kbd('丙') + ' ' + kbd('乙');
+  replayUnveilInto(store, protyle);
+
+  assert.ok(!kbdsOf(block)[0].classList.contains(UNVEIL_CLASS), '不得把答案亮到无关的簇上');
+  assert.ok(kbdsOf(block)[1].classList.contains(UNVEIL_CLASS), '原簇的揭晓态必须留住');
+});
+
+test('replayUnveilInto：删掉一个遮罩后，同块内文本相似却从未揭晓的遮罩不得被点亮', () => {
+  const store = new UnveilStore();
+  const { protyle, block } = mountProtyle('blk', kbd('甲') + ' ' + kbd('甲子'));
+
+  // 只点开「甲」，「甲子」始终是遮蔽的。
+  clickUnveil(store, protyle, block, kbdsOf(block)[0]);
+  assert.ok(kbdsOf(block)[0].classList.contains(UNVEIL_CLASS));
+  assert.ok(!kbdsOf(block)[1].classList.contains(UNVEIL_CLASS));
+
+  // 用户把「甲」那个遮罩整个删掉（等价于原生 ⌥D 取消遮罩后 kbd 消失）。
+  // 块内簇数从 2 变 1，位置已经错开，此时绝不能把那条记录交给「甲子」——
+  // 那等于把答案亮在一个用户从没点开过的位置上。
+  block.innerHTML = kbd('甲子');
+  replayUnveilInto(store, protyle);
+
+  assert.ok(
+    !kbdsOf(block)[0].classList.contains(UNVEIL_CLASS),
+    '「甲子」不得因为文本包含「甲」就接走那条记录',
+  );
+});
+
+test('replayUnveilInto：块内簇数不变但位置已错开时，状态要跟着原遮罩走', () => {
+  const store = new UnveilStore();
+  const { protyle, block } = mountProtyle('blk', kbd('甲') + ' ' + kbd('乙'));
+
+  // 只揭晓「乙」。
+  clickUnveil(store, protyle, block, kbdsOf(block)[1]);
+
+  // 删掉「甲」，又在末尾新建「丙」：数量仍是 2，但位置已经错开。
+  block.innerHTML = kbd('乙') + ' ' + kbd('丙');
+  replayUnveilInto(store, protyle);
+
+  assert.ok(kbdsOf(block)[0].classList.contains(UNVEIL_CLASS), '揭晓态要跟着「乙」走');
+  assert.ok(!kbdsOf(block)[1].classList.contains(UNVEIL_CLASS), '新建的「丙」不得被点亮');
+});
+
+test('replayUnveilInto：两个遮罩的文本变得相同后，揭晓态仍跟着原来那一个', () => {
+  const store = new UnveilStore();
+  const { protyle, block } = mountProtyle('blk', kbd('12') + ' ' + kbd('1234'));
+
+  // 只揭晓第二个。
+  clickUnveil(store, protyle, block, kbdsOf(block)[1]);
+
+  // 把第二个改成与第一个同文本：两个簇的文字完全一样，只能靠位置区分。
+  block.innerHTML = kbd('12') + ' ' + kbd('12');
+  replayUnveilInto(store, protyle);
+
+  assert.ok(!kbdsOf(block)[0].classList.contains(UNVEIL_CLASS), '第一个从未被点开，不得亮起');
+  assert.ok(kbdsOf(block)[1].classList.contains(UNVEIL_CLASS), '第二个的揭晓态要留住');
+});
+
+test('replayUnveilInto：同一条记录不得被两个簇同时认领', () => {
+  const store = new UnveilStore();
+  const { protyle, block } = mountProtyle('blk', kbd('甲') + ' ' + kbd('乙'));
+
+  // 只揭晓位置 1 的「乙」。
+  clickUnveil(store, protyle, block, kbdsOf(block)[1]);
+
+  // 把位置 0 改成「乙」：两个簇的键都长成 blk#乙@N，位置级已经把那条记录判给了位置 1。
+  // 精确级不得再认领一次——它只看「记录里有没有这个键」，不看这条记录是不是已经被领走，
+  // 于是位置 0 会被点亮，而它从未被点开。
+  block.innerHTML = kbd('乙') + ' ' + kbd('乙');
+  replayUnveilInto(store, protyle);
+
+  assert.ok(!kbdsOf(block)[0].classList.contains(UNVEIL_CLASS), '位置 0 从未被点开，不得亮起');
+  assert.ok(kbdsOf(block)[1].classList.contains(UNVEIL_CLASS), '位置 1 必须留住');
+});
+
+test('replayUnveilInto：块内多个 kbd 一起变空的中间态，不得把整块记录清空', () => {
+  const store = new UnveilStore();
+  const { protyle, block } = mountProtyle('blk', kbd('1234') + ' ' + kbd('5678'));
+
+  clickUnveil(store, protyle, block, kbdsOf(block)[0]);
+
+  // 思源重建块：两个 kbd 元素都还在，文本同时暂时为空。
+  // 若把空文本记进顺序表，下一轮就会把它当成「重复答案少了一个」，整块记录被清掉，
+  // 而且不会自己恢复。
+  block.innerHTML = kbd('') + ' ' + kbd('');
+  replayUnveilInto(store, protyle);
+
+  block.innerHTML = kbd('1234') + ' ' + kbd('5678');
+  replayUnveilInto(store, protyle);
+
+  assert.ok(kbdsOf(block)[0].classList.contains(UNVEIL_CLASS), '揭晓态必须自己恢复');
+  assert.ok(!kbdsOf(block)[1].classList.contains(UNVEIL_CLASS), '另一个仍应保持遮蔽');
+  assert.equal(store.peek(protyle).size, 1, '记录不得被清空');
+});
+
+test('replayBlockUnveil：单块入口与整篇回放结果一致', () => {
+  const store = new UnveilStore();
+  const { protyle, block } = mountProtyle('blk', kbd('甲'));
+
+  toggleClusterUnveil(store.ensure(protyle), block, getClozeCluster(kbdsOf(block)[0]));
+
+  const rebuilt = blockWith('blk', kbd('甲'));
+  block.replaceWith(rebuilt);
+  assert.equal(unveiledCount(rebuilt), 0);
+
+  // DOM 抖动时走的就是这条入口：同步补类，不扫全篇。
+  replayBlockUnveil(store, rebuilt);
+  assert.ok(kbdsOf(rebuilt)[0].classList.contains(UNVEIL_CLASS));
+
+  // 没有记录的块必须原样放过。
+  const other = blockWith('blk-other', kbd('乙'));
+  replayBlockUnveil(store, other);
+  assert.equal(unveiledCount(other), 0);
 });
 
 test('store.drop 之后回放不再生效——「关文档恢复默认遮蔽」', () => {
@@ -487,33 +808,215 @@ test('toggleUnveilByKey：单击立即生效，撤回即回到原状', () => {
   assert.equal(records.size, 0, '撤回不得留下记录');
 });
 
-test('shouldRollback：只有双击落在同一个遮罩块上才撤回', () => {
-  const target = (key, root = null) => ({ root: root || document.body, nodeId: 'blk', key });
+/* ------------------------------------------------------- 过渡与待摘标记 */
 
-  assert.equal(shouldRollback(target('blk#甲@0'), target('blk#甲@0')), true, '同一遮罩块：撤回');
+test('过渡只在用户主动切换时配，回放补类不配', () => {
+  const store = new UnveilStore();
+  const { protyle, block } = mountProtyle('blk', kbd('甲'));
 
-  assert.equal(
-    shouldRollback(target('blk#甲@0'), target('blk#乙@0')),
-    false,
-    '落在别的遮罩块上不得撤回，那次双击也不该被拦下',
+  // 点击切换：要配过渡，否则揭晓/遮蔽的切换会变得生硬。
+  clickUnveil(store, protyle, block, kbdsOf(block)[0]);
+  assert.ok(kbdsOf(block)[0].classList.contains(ANIMATE_CLASS), '点击切换必须配过渡');
+
+  // 回放补类：不得配过渡，否则「补类」这一步本身会变成一段从模糊到清晰的动画。
+  const rebuilt = blockWith('blk', kbd('甲'));
+  block.replaceWith(rebuilt);
+  replayUnveilInto(store, protyle);
+
+  assert.ok(kbdsOf(rebuilt)[0].classList.contains(UNVEIL_CLASS));
+  assert.ok(!kbdsOf(rebuilt)[0].classList.contains(ANIMATE_CLASS), '回放补类不得配过渡');
+});
+
+test('replayUnveilInto：一轮对不上只挂待摘标记，连续两轮才真的摘掉', () => {
+  const store = new UnveilStore();
+  const { protyle, block } = mountProtyle('blk', kbd('甲') + ' ' + kbd('乙'));
+
+  clickUnveil(store, protyle, block, kbdsOf(block)[0]);
+  assert.ok(kbdsOf(block)[0].classList.contains(UNVEIL_CLASS));
+
+  // 只换文本、不换元素——思源重建过程中会出现这种中间态，元素还在、文本已经变了。
+  // 当场摘掉、下一轮再加回来，屏幕上就是一次「亮 → 暗 → 亮」的闪动。
+  kbdsOf(block)[0].textContent = `${WJ}丙`;
+  replayUnveilInto(store, protyle);
+
+  assert.ok(kbdsOf(block)[0].classList.contains(UNVEIL_CLASS), '首轮不得当场摘掉');
+  assert.ok(kbdsOf(block)[0].classList.contains(HIDING_CLASS), '首轮只挂待摘标记');
+
+  replayUnveilInto(store, protyle);
+
+  assert.ok(!kbdsOf(block)[0].classList.contains(UNVEIL_CLASS), '连续两轮都对不上才真摘');
+  assert.ok(!kbdsOf(block)[0].classList.contains(HIDING_CLASS), '待摘标记要一并清掉');
+});
+
+test('replayUnveilInto：blocked 清空记录后不得把揭晓类留在元素上', () => {
+  const store = new UnveilStore();
+  const { protyle, block } = mountProtyle('blk', kbd('乙') + ' ' + kbd('乙'));
+
+  // 揭晓位置 0，再把位置 1 整个删掉：重复答案少了一个，该文本的记录整批作废。
+  // 必须只删元素、留着位置 0 那个（它还带着揭晓类），否则重建出来的新元素本来就没类，
+  // 测不出「残留」。
+  clickUnveil(store, protyle, block, kbdsOf(block)[0]);
+  assert.ok(kbdsOf(block)[0].classList.contains(UNVEIL_CLASS));
+
+  kbdsOf(block)[1].remove();
+  replayUnveilInto(store, protyle);
+
+  // 记录已经清空，下一轮回放会在「记录为空」处早退。若这一轮只挂待摘标记而没摘掉，
+  // 揭晓类就再也没人收拾——遮蔽规则被 :not(.sy-cloze-unveiled) 反向失效，
+  // 那个遮罩会永远亮着答案。
+  assert.equal(store.peek(protyle).size, 0, '记录已整批作废');
+  assert.ok(!kbdsOf(block)[0].classList.contains(UNVEIL_CLASS), '揭晓类必须当场摘掉');
+  assert.ok(!kbdsOf(block)[0].classList.contains(HIDING_CLASS), '待摘标记也不得留下');
+
+  replayUnveilInto(store, protyle);
+  replayUnveilInto(store, protyle);
+
+  assert.equal(unveiledCount(protyle), 0, '再跑两轮也不得复活');
+});
+
+test('resetAllUnveil：⌥X 重置要连待摘标记一起清', () => {
+  const store = new UnveilStore();
+  const { protyle, block } = mountProtyle('blk', kbd('甲') + ' ' + kbd('乙'));
+
+  clickUnveil(store, protyle, block, kbdsOf(block)[0]);
+
+  // 先造一个待摘标记：把文本改成对不上的内容，跑一轮回放（首轮只挂标记、不摘）。
+  kbdsOf(block)[0].textContent = `${WJ}丙`;
+  replayUnveilInto(store, protyle);
+  assert.ok(kbdsOf(block)[0].classList.contains(HIDING_CLASS), '先造出待摘标记');
+
+  resetAllUnveil(store, document.body);
+
+  assert.ok(!kbdsOf(block)[0].classList.contains(UNVEIL_CLASS));
+  assert.ok(!kbdsOf(block)[0].classList.contains(HIDING_CLASS), '重置不得留下待摘标记');
+});
+
+test('UnveilStore.drop：关文档时连待摘标记一起清', () => {
+  const store = new UnveilStore();
+  const { protyle, block } = mountProtyle('blk', kbd('甲'));
+
+  clickUnveil(store, protyle, block, kbdsOf(block)[0]);
+
+  kbdsOf(block)[0].textContent = `${WJ}丙`;
+  replayUnveilInto(store, protyle);
+  assert.ok(kbdsOf(block)[0].classList.contains(HIDING_CLASS));
+
+  store.drop(protyle);
+
+  assert.ok(!kbdsOf(block)[0].classList.contains(UNVEIL_CLASS));
+  assert.ok(!kbdsOf(block)[0].classList.contains(HIDING_CLASS), '关文档不得留下待摘标记');
+});
+
+test('replayBlockUnveil：块内没有记录时，残留的标记也要就地清掉', () => {
+  const store = new UnveilStore();
+  const { protyle, block } = mountProtyle('blk', kbd('甲') + ' ' + kbd('乙'));
+
+  // 造一个「这个块没有记录、元素却带着标记」的状态：记录挂在别的块上，
+  // 因此走的是块级早退口，而不是「整篇记录为空」那条兜底。
+  store.ensure(protyle).set('other#甲@0', true);
+  kbdsOf(block)[0].classList.add(UNVEIL_CLASS);
+  kbdsOf(block)[1].classList.add(HIDING_CLASS);
+
+  replayBlockUnveil(store, block);
+
+  assert.ok(!kbdsOf(block)[0].classList.contains(UNVEIL_CLASS), '残留的揭晓类要清掉');
+  assert.ok(!kbdsOf(block)[1].classList.contains(HIDING_CLASS), '残留的待摘标记也要清掉');
+});
+
+test('replayBlockUnveil：清理残留标记时不得碰嵌套子块', () => {
+  const store = new UnveilStore();
+
+  const protyle = document.createElement('div');
+  protyle.className = 'protyle';
+  const wysiwyg = document.createElement('div');
+  wysiwyg.className = 'protyle-wysiwyg';
+
+  const parent = document.createElement('div');
+  parent.setAttribute('data-node-id', 'parent');
+  const child = document.createElement('div');
+  child.setAttribute('data-node-id', 'child');
+  child.innerHTML = kbd('甲');
+  parent.appendChild(child);
+  wysiwyg.appendChild(parent);
+  protyle.appendChild(wysiwyg);
+  document.body.appendChild(protyle);
+
+  // 子块有记录、元素带揭晓类；父块自己没有记录，走的是块级早退口。
+  // 思源的列表项、引述块、超级块都是嵌套的 [data-node-id]，父块的回放不能递归进去把
+  // 子块的标记清掉——那样会出现「记录还在、标记没了」，父块排在后时还不自愈。
+  store.ensure(protyle).set('child#甲@0', true);
+  kbdsOf(child)[0].classList.add(UNVEIL_CLASS);
+
+  replayBlockUnveil(store, parent);
+
+  assert.ok(
+    kbdsOf(child)[0].classList.contains(UNVEIL_CLASS),
+    '子块的揭晓类不得被父块的清理顺手摘掉',
   );
+});
 
-  assert.equal(
-    shouldRollback(target('blk#甲@0'), null),
-    false,
-    '落在正文上不得撤回——否则「点开遮罩后去正文双击选词」会把遮罩无故翻回去',
+test('replayBlockUnveil：元素自身带 data-node-id 时也要清掉残留标记', () => {
+  const store = new UnveilStore();
+  const { protyle, block } = mountProtyle('blk', kbd('甲'));
+
+  store.ensure(protyle).set('other#甲@0', true);
+  const el = kbdsOf(block)[0];
+  // 行内引用、行内公式的渲染容器常自带 data-node-id，守卫不能因此把它当成别的块。
+  el.setAttribute('data-node-id', 'inline-ref');
+  el.classList.add(UNVEIL_CLASS);
+
+  replayBlockUnveil(store, block);
+
+  assert.ok(!el.classList.contains(UNVEIL_CLASS), '自身带 node-id 也要按所属块清掉');
+});
+
+test('replayBlockUnveil：root 级早退不得清掉嵌套内层 protyle 的标记', () => {
+  const store = new UnveilStore();
+
+  // 外层文档：一个表格块，里面嵌着单元格自己的 .protyle。
+  const outer = document.createElement('div');
+  outer.className = 'protyle';
+  const outerWysiwyg = document.createElement('div');
+  outerWysiwyg.className = 'protyle-wysiwyg';
+  const tableBlock = document.createElement('div');
+  tableBlock.setAttribute('data-node-id', 'table-block');
+
+  const inner = document.createElement('div');
+  inner.className = 'protyle';
+  const innerWysiwyg = document.createElement('div');
+  innerWysiwyg.className = 'protyle-wysiwyg';
+  const cellBlock = document.createElement('div');
+  cellBlock.setAttribute('data-node-id', 'cell-block');
+  cellBlock.innerHTML = kbd('甲');
+  innerWysiwyg.appendChild(cellBlock);
+  inner.appendChild(innerWysiwyg);
+  tableBlock.appendChild(inner);
+  outerWysiwyg.appendChild(tableBlock);
+  outer.appendChild(outerWysiwyg);
+  document.body.appendChild(outer);
+
+  // 外层 root 没有任何记录（走 root 级早退），内层单元格有自己的记录与标记。
+  store.ensure(outer);
+  store.ensure(inner).set('cell-block#甲@0', true);
+  kbdsOf(cellBlock)[0].classList.add(UNVEIL_CLASS);
+
+  replayBlockUnveil(store, tableBlock);
+
+  assert.ok(
+    kbdsOf(cellBlock)[0].classList.contains(UNVEIL_CLASS),
+    '单元格的揭晓态不得被外层块的清理顺手摘掉',
   );
+});
 
-  assert.equal(
-    shouldRollback(undefined, target('blk#甲@0')),
-    false,
-    '没有待撤回项时不得凭空切换',
-  );
+test('JS 与 CSS 的契约：过渡必须由动画类门控', () => {
+  const stripped = scss.replace(/\/\*[\s\S]*?\*\//g, '');
+  const rules = stripped.split('}').filter((rule) => rule.includes('transition'));
 
-  assert.equal(
-    shouldRollback(target('blk#甲@0'), target('blk#甲@0', document.createElement('div'))),
-    false,
-    '跨文档不得撤回',
+  assert.equal(rules.length, 1, 'transition 只该出现在一条规则里');
+  assert.ok(rules[0].includes(ANIMATE_CLASS), `过渡必须由 .${ANIMATE_CLASS} 门控`);
+  assert.ok(
+    !rules[0].includes('body.sy-cloze-active'),
+    '过渡不得挂在基础规则或遮蔽段上——那样回放补类会变成一段可见的渐变',
   );
 });
 
@@ -551,4 +1054,95 @@ test('JS 与 CSS 的契约：手型光标只挂在遮蔽开启时，且不落在
 
 test('两种透晓态必须是彼此独立的类名', () => {
   assert.notEqual(UNVEIL_CLASS, REVEAL_CLASS, '划选临时态与点击持久态混用会让「离开选区即撤」失效');
+});
+
+test('JS 与 CSS 的契约：遮蔽态的命中区要跟着模糊范围一起外扩', () => {
+  const stripped = scss.replace(/\/\*[\s\S]*?\*\//g, '');
+  const rules = stripped.split('}');
+
+  // blur(6px) 让模糊块看起来比实际宽出一圈，而 kbd 的 padding 只有 1px。命中区不跟着扩，
+  // 用户照着模糊的边缘点下去就落到相邻文本上，这次点击等于没发生。
+  const maskRule = rules.find((rule) => rule.includes('blur(6px)'));
+  assert.ok(maskRule, '找不到遮蔽段规则');
+  assert.ok(maskRule.includes('position: relative'), '遮蔽段要给外扩的伪元素留定位参照');
+
+  const hitRule = rules.find((rule) => rule.includes('::after') && rule.includes('pointer-events'));
+  assert.ok(hitRule, '遮蔽态缺少外扩命中区');
+  assert.ok(/left:\s*-\d/.test(hitRule) && /right:\s*-\d/.test(hitRule), '命中区要左右外扩');
+  assert.ok(hitRule.includes(KBD_SELECTOR), '命中区必须挂在 kbd 上，否则事件目标不再是遮罩');
+});
+
+test('JS 与 CSS 的契约：切换挂在 mousedown 上，命中时把整次交互吞掉', () => {
+  const source = fs.readFileSync(path.join(repoRoot, 'src/index.ts'), 'utf8');
+
+  // click 只在 mousedown 与 mouseup 落在同一目标上时才派发，按下抬起之间抖几个像素就丢
+  // 了——那次点击既不切换又已经开始了拖选。mousedown 在拖选开始之前一定触发。
+  assert.ok(
+    /addEventListener\('mousedown',\s*this\.\w+,\s*true\)/.test(source),
+    '切换必须挂在捕获阶段的 mousedown 上',
+  );
+  assert.ok(
+    /addEventListener\('mouseup',\s*this\.\w+,\s*true\)/.test(source) &&
+      /addEventListener\('click',\s*this\.\w+,\s*true\)/.test(source),
+    '命中遮罩时 mouseup 与 click 也要拦：只拦 mousedown 的话，思源照样会更新选区快照、弹出公式编辑器',
+  );
+  assert.ok(
+    !/e\.detail\s*[<>=]/.test(source),
+    '不做双击回滚：preventDefault 已经让双击选词不可能发生，回滚只会让手快的人点两下等于没点',
+  );
+  assert.ok(
+    !/swallowUntil/.test(source),
+    '吞事件要用「本次交互是否结束」的标记，不用固定时间窗：长按超过窗口再松开时 mouseup 会漏给思源',
+  );
+});
+
+test('JS 与 CSS 的契约：创建或取消遮罩不得顺手切换填空模式', () => {
+  const source = fs.readFileSync(path.join(repoRoot, 'src/index.ts'), 'utf8');
+
+  // 模式只由顶栏眼睛与 ⌥X 控制。之前「新建一处遮罩就把整篇切进填空模式」会让只想取消
+  // 遮罩、却因选区没被识别成 kbd 而走了创建路径的用户，莫名其妙换了一整篇的模式。
+  assert.ok(
+    !/this\.isClozeActive\s*=\s*true/.test(source),
+    '除 toggleGlobalCloze 外，别处不得把填空模式设成开启',
+  );
+});
+
+test('JS 与 CSS 的契约：提示线沿文字走，不穿公式', () => {  const stripped = scss.replace(/\/\*[\s\S]*?\*\//g, '');
+  const rules = stripped.split('}');
+  const baseRule = rules.find(
+    (rule) => rule.includes('text-decoration-line') && rule.includes(KBD_SELECTOR),
+  );
+
+  assert.ok(baseRule, '找不到基础外观规则');
+  assert.ok(
+    !/border-bottom:\s*\d/.test(baseRule),
+    'border 围的是行盒，遮罩里嵌了矩阵这类高公式时会从公式中间横穿过去，得改用 text-decoration',
+  );
+  assert.ok(baseRule.includes('--b3-theme-primary'), '提示线要用主题色，深浅主题才都看得清');
+  assert.ok(
+    /text-decoration-thickness:\s*2px/.test(baseRule),
+    '提示线要够粗，1.5px 的虚线本身就看不清',
+  );
+
+  assert.ok(
+    rules.find((rule) => rule.includes('inline-math') && rule.includes('inline-block')),
+    'text-decoration 会传播进非原子行内级的后代，公式不钉成 inline-block 的话提示线照样横穿',
+  );
+});
+
+test('JS 契约：提交切换时不得按块 ID 直接取第一个元素', () => {
+  const source = fs.readFileSync(path.join(repoRoot, 'src/index.ts'), 'utf8');
+
+  // 同一个块 ID 在 protyle 根里可能同时存在多个元素（实测 3 个），querySelector 拿到的
+  // 第一个未必是含遮罩的那份，会算出一个空簇，这次点击被静默丢掉——表现就是「点了没反应」，
+  // 而且只在部分块上复现（列表项能切、普通段落不能）。必须用点击时的锚点解析，或逐个同 ID
+  // 元素试到能算出键的那个。
+  assert.ok(
+    !/querySelector\(`\[data-node-id/.test(source),
+    '按块 ID 取第一个元素会踩到同 ID 副本，改用锚点解析或逐个同 ID 元素试',
+  );
+  assert.ok(
+    /target\.anchor\.isConnected\s*&&\s*target\.root\.contains\(target\.anchor\)/.test(source),
+    '一级解析要校验锚点仍属于这个 root：块被移到别的编辑器时锚点依然 isConnected，只用它会把记录写进旧 root',
+  );
 });
