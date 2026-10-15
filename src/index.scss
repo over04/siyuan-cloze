@@ -28,30 +28,40 @@
   transition: filter 0.25s ease-in-out, opacity 0.25s ease-in-out !important;
 }
 
+/* 手型光标只在遮蔽开启时出现，提示「这里可以点」。写在独立的、不含 :not() 的
+   规则里，因此遮蔽态与揭晓态都保留；关闭遮蔽进入纯编辑时则不会出现
+   「手型光标但点了没反应」的误导。 */
+body.sy-cloze-active span[data-type~="kbd"] {
+  cursor: pointer !important;
+}
+
 /* ==========================================================================
    二、背诵遮蔽状态（与 git 2915f87 的视觉一致）
 
    核心遮蔽：100% 灰度脱敏 + 深度毛玻璃模糊。
 
-   显晓由 JS 统一驱动：悬停或划选命中整簇时，给簇内每个成员（kbd 切片
-   与夹在中间的行内公式）都加上 .sy-cloze-reveal，本段用 :not() 反向生效，
-   于是整簇一起恢复高清真彩，不存在「悬停左边整簇亮、悬停右边只亮半边」
-   的方向性缺口。
+   透晓由 JS 统一驱动，两种态都以「整簇」为单位，簇内每个成员（kbd 切片
+   与夹在中间的行内公式）一起恢复高清真彩：
+
+     - .sy-cloze-reveal   ：划选临时透晓，选区离开即撤
+     - .sy-cloze-unveiled ：点击切换的持久揭晓，活到本次文档打开结束
+
+   两者都靠下面这两条规则里的 :not() 反向失效，因此不存在「悬停左边整簇亮、
+   悬停右边只亮半边」的方向性缺口。
    ========================================================================== */
 
-body.sy-cloze-active span[data-type~="kbd"]:not(.sy-cloze-reveal) {
+body.sy-cloze-active span[data-type~="kbd"]:not(.sy-cloze-reveal):not(.sy-cloze-unveiled) {
   background: transparent !important;
   border: none !important;
   border-bottom-color: transparent !important;
   box-shadow: none !important;
   outline: none !important;
-  cursor: pointer !important;
 
   /* 核心遮蔽：100% 灰度脱敏 + 深度毛玻璃模糊 */
   filter: blur(6px) grayscale(100%) !important;
   opacity: 0.65 !important;
 }
 
-body.sy-cloze-active span[data-type~="kbd"]:not(.sy-cloze-reveal) * {
+body.sy-cloze-active span[data-type~="kbd"]:not(.sy-cloze-reveal):not(.sy-cloze-unveiled) * {
   transition: filter 0.25s ease-in-out, opacity 0.25s ease-in-out !important;
 }

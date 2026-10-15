@@ -194,3 +194,108 @@ export const findKbdInRange = (range: Range, block: Element | null): HTMLElement
   }
   return null;
 };
+
+/* ==========================================================================
+   点击揭晓（持久态）
+   ========================================================================== */
+
+/**
+ * 点击揭晓类的类名。与划选临时透晓 REVEAL_CLASS 相互独立：
+ * 划选结束即撤，点击则活到本次文档打开结束。
+ */
+export const UNVEIL_CLASS = 'sy-cloze-unveiled';
+
+/** 承载揭晓态生命周期的容器：思源每篇打开的文档对应一个 .protyle 根元素。 */
+export const PROTYLE_SELECTOR = '.protyle';
+
+/**
+ * 从任意节点向上找 protyle 根元素。
+ *
+ * 揭晓态按这个元素记录：切换页签只是显隐、DOM 不销毁，状态因此得以保留；
+ * 文档关闭后元素被移除，记录随之被 GC 回收——「关文档恢复默认遮蔽」
+ * 由此零成本成立，不需要任何销毁事件判定。
+ */
+export const resolveProtyleRoot = (node: Node | null): HTMLElement | null => {
+  const el = resolveElement(node);
+  if (!el) return null;
+  return el.closest<HTMLElement>(PROTYLE_SELECTOR) || el.closest<HTMLElement>('.protyle-wysiwyg');
+};
+
+/**
+ * 成员文本：公式优先取思源持久化的 data-content，其余取可见文本，剔除零宽字符。
+ *
+ * data-content 由思源按 Markdown 源码写出，DOM 重建后必然一致；kbd 文本切片没有
+ * 这个属性，回落到 textContent。
+ */
+const memberFingerprint = (el: HTMLElement): string => {
+  const raw = el.getAttribute('data-content') || el.textContent || '';
+  return raw.replace(/[\u200b\u2060\ufeff]/g, '').trim();
+};
+
+/** 块内一个簇及其揭晓键。 */
+export interface BlockCluster {
+  cluster: HTMLElement[];
+  key: string;
+}
+
+/**
+ * 一次性算出块内所有簇及其揭晓键，按 DOM 顺序返回。
+ *
+ * 键 = 块 ID + 该簇全部成员的文本按顺序拼起来 + 同文本出现的次序。
+ *
+ * 为什么不用「簇首切片在块内的序号」：块内每增删一个遮罩，所有旧序号都会整体
+ * 往后挪，记录也就跟着对错了地方。实际遇到的序列——段落 `前言 甲 乙`，点击
+ * 「甲」揭晓（记录 `blk#0`），再选中「前言」按 ⌥Q 新建遮罩，`blk#0` 就落到了
+ * 新遮罩头上：新遮罩一出现就是揭晓状态（背诵时等于直接把答案摆出来），而「甲」
+ * 的编号变成 `blk#1`、记录里没有，被回放重新遮蔽。改用答案文本则不受同块内
+ * 增删影响，这类错位从根上消失。
+ *
+ * 末尾的序号用来区分「答案文本完全相同」的多个遮罩：同段落出现重复答案
+ * （`填空 填空`）时，两簇的答案文本一模一样，不加序号就会共用同一条记录——
+ * 点第二个会把第一个的记录删掉，屏幕上却还显示着第一个，出现「记录为空、
+ * 显示还在」的不一致。序号只在同块内出现重复答案文本时才递增，因此不影响
+ * 上面那条「新建遮罩不改变已有簇的记录」的性质（新遮罩的答案文本不同，
+ * 不会插进同一组里）。
+ *
+ * 键只由页面上看得见的内容推导，不往笔记里写任何属性，与「不落盘、不改动
+ * 笔记数据」的要求一致。簇内文本被编辑后答案文本会变，该簇的揭晓状态随之丢失
+ * ——这只少记一次揭晓，不会把答案显示到别的遮罩上。
+ */
+export const listBlockClusters = (block: Element): BlockCluster[] => {
+  const nodeId = block.getAttribute('data-node-id');
+  if (!nodeId) return [];
+
+  const kbds = block.querySelectorAll<HTMLElement>(KBD_SELECTOR);
+  const handled = new Set<Element>();
+  const duplicates = new Map<string, number>();
+  const out: BlockCluster[] = [];
+
+  for (let i = 0; i < kbds.length; i++) {
+    const kbd = kbds[i];
+    if (handled.has(kbd)) continue;
+
+    const cluster = getClozeCluster(kbd);
+    cluster.forEach((el) => handled.add(el));
+
+    const fingerprint = cluster.map(memberFingerprint).join('|');
+    const dup = duplicates.get(fingerprint) || 0;
+    duplicates.set(fingerprint, dup + 1);
+
+    out.push({ cluster, key: `${nodeId}#${fingerprint}@${dup}` });
+  }
+
+  return out;
+};
+
+/**
+ * 单个簇的揭晓键。簇首不属于本块时返回 null。
+ *
+ * 批量场景请直接用 listBlockClusters：它一次遍历给出全部键，
+ * 逐个调用本函数会在块内形成平方级重复计算。
+ */
+export const getClusterKey = (block: Element | null, cluster: HTMLElement[]): string | null => {
+  if (!block || cluster.length === 0) return null;
+
+  const found = listBlockClusters(block).find((item) => item.cluster[0] === cluster[0]);
+  return found ? found.key : null;
+};

@@ -26,6 +26,7 @@ npm test
 | `cluster.test.mjs` | 集群分组、桥接判据、`kbd` 选择器语义 |
 | `anchor.test.mjs` | 锚点解析、邻居扫描、节点解析、选区求交，以及 JS↔CSS 契约 |
 | `tableCell.test.mjs` | 单元格形态判定与可见文本偏移换算（`src/tableCell.ts` 纯函数层） |
+| `unveil.test.mjs` | 标识稳定性、记录与回放、关文档恢复默认、SCSS 契约（`src/unveil.ts` 纯函数层） |
 | `helpers.mjs` | 共用件：jsdom 装配与块包装（不以 `.test.mjs` 结尾，不会被当用例执行） |
 
 `cluster.test.mjs` 用 jsdom 建真实 DOM，直接调用 `src/cluster.ts` 里的集群算法。
@@ -37,6 +38,12 @@ npm test
 与显晓类施加——它们依赖 `protyle.toolbar` 与真实单元格编辑器，必须在真实编辑器里才跑得起来；
 `index.scss` 的遮蔽视觉也没有断言。
 `anchor.test.mjs` 末尾的契约用例只锁住类名与选择器这两个跨文件常量。
+
+`unveil.test.mjs` 覆盖纯函数层：键稳定性与重复答案消歧、点击切换（整簇加类/去类）、
+DOM 重建后回放保活、失效记录两轮核对、`store.drop` 后恢复默认遮蔽、取消遮罩时作废并校正视觉。
+**仍未覆盖**：`src/index.ts` 的 `initClickToggle` 捕获阶段接管与 `commitToggle` 的 DOM 重定位接线、
+`MutationObserver` 调度、`destroy-protyle` 事件接线，以及表格单元格编辑态下的块重建行为
+——这些都需要真实思源运行时，只能手工验收。
 `tableCell.test.mjs` 覆盖 `src/tableCell.ts` 的纯函数层（形态判定、可见文本偏移往返），
 但退避流程本身（派发 pointerdown → 触发 finish → 重建选区 → 重执行）仍需真实内核验证。
 

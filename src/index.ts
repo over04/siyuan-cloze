@@ -3,11 +3,24 @@ import {
   INVISIBLE_TEXT,
   KBD_SELECTOR,
   REVEAL_CLASS,
+  UNVEIL_CLASS,
   findKbdInRange,
   getClozeCluster,
+  getClusterKey,
   resolveClozeAnchor,
   resolveElement,
+  resolveProtyleRoot,
 } from './cluster';
+import {
+  UnveilStore,
+  dropUnveilForBlockId,
+  findClusterByKey,
+  replayUnveilInto,
+  resetAllUnveil,
+  shouldRollback,
+  toggleUnveilByKey,
+  type ToggleTarget,
+} from './unveil';
 import {
   CELL_CONTENT_SELECTOR,
   CELL_SELECTOR,
@@ -30,20 +43,36 @@ const DEFAULT_SETTINGS: PluginSettings = {
   defaultHide: true,
 };
 
+/** DOM 重建后回放的节流间隔；回放只是补 class，一帧量级足够。 */
+const REPLAY_THROTTLE_MS = 16;
+
 export default class ClozePlugin extends Plugin {
   private settings: PluginSettings = { ...DEFAULT_SETTINGS };
   private isClozeActive: boolean = true;
   private topBarElement?: HTMLElement;
 
-  /** 鼠标当前所在的集群（整簇，含被夹住的行内公式）。 */
-  private hoverCluster: HTMLElement[] = [];
-  /** 当前已挂上显晓类的元素，用于差分增删，避免每次全量 classList 抖动。 */
+  /** 当前已挂上划选透晓类的元素，用于差分增删，避免每次全量 classList 抖动。 */
   private revealedElements: HTMLElement[] = [];
   private revealRaf = 0;
 
-  private pointerOverHandler?: (e: MouseEvent) => void;
-  private pointerOutHandler?: (e: MouseEvent) => void;
+  /**
+   * 点击揭晓态（持久显示）。
+   *
+   * 记录按 protyle 根元素分开存，并显式监听 destroy-protyle 删除：切页签只是显隐、
+   * DOM 不销毁，状态因此保留；关闭文档时事件到达，记录随即作废，回到默认遮蔽。
+   * 全程零落盘——揭晓只是本次阅读会话的临时标注，不该污染笔记数据。
+   */
+  private unveilStore = new UnveilStore();
+  /** DOM 重建后待回放揭晓态的 protyle 集合（定时器合并）。 */
+  private pendingUnveilRoots = new Set<HTMLElement>();
+  private unveilTimer = 0;
+  /** 刚被单击切换过的目标，供 dblclick 原样撤回。 */
+  private lastToggle?: ToggleTarget;
+
   private selectionHandler?: () => void;
+  private clickToggleHandler?: (e: MouseEvent) => void;
+  private doubleClickHandler?: (e: MouseEvent) => void;
+  private domObserver?: MutationObserver;
   /** 单元格编辑态下的快捷键兜底监听（捕获阶段）。 */
   private cellShortcutHandler?: (e: KeyboardEvent) => void;
 
@@ -57,7 +86,9 @@ export default class ClozePlugin extends Plugin {
     this.initCommands();
     this.initSettingsPanel();
     this.initEventBus();
-    this.initRevealListeners();
+    this.initSelectionReveal();
+    this.initClickToggle();
+    this.initDomObserver();
     this.initCellShortcutFallback();
 
     this.updateGlobalStyles();
@@ -66,7 +97,9 @@ export default class ClozePlugin extends Plugin {
   onunload() {
     console.log('[Cloze] Unloading SiYuan Lossless Inline Cloze Plugin...');
     this.removeCellShortcutFallback();
-    this.removeRevealListeners();
+    this.removeDomObserver();
+    this.removeClickToggle();
+    this.removeSelectionReveal();
     this.cleanAllClozeArtifacts();
   }
 
@@ -157,64 +190,32 @@ export default class ClozePlugin extends Plugin {
   }
 
   /* ========================================================================
-     一、显晓联动：悬停 / 划选都以「整簇」为单位
+     一、透晓联动：划选临时透晓 + 点击持久揭晓
 
-     遮蔽本身是纯 CSS（字形透明 + 模糊光晕），JS 只负责一件事：
-     决定哪些元素该加上显晓类。判定口径统一在成员数组上，因此不存在
-     「悬停左边整簇亮、悬停右边只亮半边」这类方向性缺口。
+     遮蔽本身是纯 CSS（字形透明 + 毛玻璃模糊），JS 只负责决定哪些元素
+     该带上透晓类：
+
+       - sy-cloze-reveal   ：划选临时态，选区离开即撤（悬停透晓已按需求移除）
+       - sy-cloze-unveiled ：点击切换的持久态，活到本次文档打开结束
+
+     两者判定口径统一在「整簇」上，因此不存在「悬停左边整簇亮、悬停右边
+     只亮半边」这类方向性缺口。
      ======================================================================== */
 
-  private initRevealListeners() {
-    this.pointerOverHandler = (e: MouseEvent) => {
-      if (!this.isClozeActive) return;
-      const anchor = resolveClozeAnchor(e.target as Node | null);
-      if (!anchor) {
-        this.setHoverCluster([]);
-        return;
-      }
-      this.setHoverCluster(getClozeCluster(anchor));
-    };
-
-    this.pointerOutHandler = (e: MouseEvent) => {
-      if (!this.isClozeActive) return;
-      const related = e.relatedTarget as Node | null;
-      // 鼠标只是在集群内部或 kbd 的子元素之间移动时不清理，避免闪烁
-      if (related && this.hoverCluster.some((el) => el === related || el.contains(related))) {
-        return;
-      }
-      this.setHoverCluster([]);
-    };
-
+  private initSelectionReveal() {
     this.selectionHandler = () => this.scheduleRevealUpdate();
-
-    document.addEventListener('mouseover', this.pointerOverHandler, true);
-    document.addEventListener('mouseout', this.pointerOutHandler, true);
     document.addEventListener('selectionchange', this.selectionHandler);
   }
 
-  private removeRevealListeners() {
-    if (this.pointerOverHandler) {
-      document.removeEventListener('mouseover', this.pointerOverHandler, true);
-    }
-    if (this.pointerOutHandler) {
-      document.removeEventListener('mouseout', this.pointerOutHandler, true);
-    }
+  private removeSelectionReveal() {
     if (this.selectionHandler) {
       document.removeEventListener('selectionchange', this.selectionHandler);
+      this.selectionHandler = undefined;
     }
     if (this.revealRaf) {
       window.cancelAnimationFrame(this.revealRaf);
       this.revealRaf = 0;
     }
-  }
-
-  private setHoverCluster(cluster: HTMLElement[]) {
-    const same = cluster.length === this.hoverCluster.length &&
-      cluster.every((el, index) => el === this.hoverCluster[index]);
-    if (same) return;
-
-    this.hoverCluster = cluster;
-    this.scheduleRevealUpdate();
   }
 
   private scheduleRevealUpdate() {
@@ -226,14 +227,13 @@ export default class ClozePlugin extends Plugin {
   }
 
   /**
-   * 重新计算显晓集合：鼠标所在的整簇 ∪ 与划选范围相交的所有整簇。
-   * 划选那一路解决的是「遮罩开着时划选看不清自己选了什么」。
+   * 重新计算划选透晓集合：与选区相交的所有整簇。
+   * 这一路解决的是「遮罩开着时划选看不清自己选了什么」。
    */
   private updateReveal() {
     const next = new Set<HTMLElement>();
 
     if (this.isClozeActive) {
-      this.hoverCluster.forEach((el) => next.add(el));
       this.collectSelectedClusters(next);
     }
 
@@ -267,7 +267,6 @@ export default class ClozePlugin extends Plugin {
   }
 
   private clearReveal() {
-    this.hoverCluster = [];
     for (const el of this.revealedElements) {
       el.classList.remove(REVEAL_CLASS);
     }
@@ -275,29 +274,208 @@ export default class ClozePlugin extends Plugin {
   }
 
   /* ========================================================================
-     二、事件总线
+     二、点击揭晓（持久态）
+
+     捕获阶段监听：表格单元格编辑器对 mousedown/mouseup/click 一律
+     stopPropagation，冒泡阶段收不到；捕获阶段先于目标处理，能拿到。
+     不调 preventDefault——光标定位、原生双击选词全部原样保留。
+     ======================================================================== */
+
+  /**
+   * 点击揭晓。
+   *
+   * 捕获阶段监听：表格单元格编辑器对 mousedown/mouseup/click 一律 stopPropagation，
+   * 冒泡阶段收不到；捕获阶段先于目标处理，能拿到。
+   *
+   * 遮蔽模式下，命中遮罩块的这次点击会被拦下，不再传给思源：点行内公式因此不会
+   * 弹出公式编辑器。拦的只是 click / dblclick，光标定位由 mousedown 决定，不受
+   * 影响——点完之后光标仍会落在遮罩里，想编辑就先按 ⌥X 关掉遮蔽。
+   *
+   * 单击立即生效，不做任何等待。双击时第一下已经切换过，由 dblclick 原样撤回：
+   * 「双击选词复制答案」的净效果为零，而单击零延迟。
+   */
+  private initClickToggle() {
+    this.clickToggleHandler = (e: MouseEvent) => {
+      if (!this.isClozeActive) return;
+      if (e.button !== 0) return;
+
+      const target = this.resolveToggleTarget(e.target as Node | null);
+      if (!target) {
+        // 没点中遮罩：顺手作废待撤回项，免得它跨到下一次双击里去。
+        this.lastToggle = undefined;
+        return;
+      }
+
+      e.preventDefault();
+      e.stopImmediatePropagation();
+
+      // 双击的第二下不再切换，净效果交给 dblclick 回滚。
+      if (e.detail > 1) return;
+
+      this.commitToggle(target);
+      this.lastToggle = target;
+    };
+
+    this.doubleClickHandler = (e: MouseEvent) => {
+      if (!this.isClozeActive) return;
+      if (e.button !== 0) return;
+
+      const pending = this.lastToggle;
+      this.lastToggle = undefined;
+      if (!pending) return;
+
+      // 只有这次双击确实落在刚才那个遮罩块上才撤回；落在别处一律放行给思源。
+      const target = this.resolveToggleTarget(e.target as Node | null);
+      if (!shouldRollback(pending, target)) return;
+
+      e.preventDefault();
+      e.stopImmediatePropagation();
+      this.commitToggle(pending);
+    };
+
+    document.addEventListener('click', this.clickToggleHandler, true);
+    document.addEventListener('dblclick', this.doubleClickHandler, true);
+  }
+
+  /** 把命中的簇解析成可跨重建定位的目标：只留根元素、块 ID 与标识。 */
+  private resolveToggleTarget(node: Node | null): ToggleTarget | null {
+    const anchor = resolveClozeAnchor(node);
+    if (!anchor) return null;
+
+    const block = anchor.closest('[data-node-id]');
+    const root = resolveProtyleRoot(anchor);
+    const nodeId = block?.getAttribute('data-node-id');
+    if (!block || !root || !nodeId) return null;
+
+    const key = getClusterKey(block, getClozeCluster(anchor));
+    return key ? { root, nodeId, key } : null;
+  }
+
+  /**
+   * 真正执行切换。
+   *
+   * 刻意不依赖点击那一刻的元素引用：按块 ID 与答案文本在当前 DOM 里重找簇。
+   * 思源在放置光标时可能重建该块 DOM，若沿用旧引用，这次点击会被静默丢弃，
+   * 用户只看到「点了没反应」。
+   */
+  private commitToggle(target: ToggleTarget) {
+    if (!this.isClozeActive) return;
+    if (!target.root.isConnected) return;
+
+    const block = target.root.querySelector(`[data-node-id="${target.nodeId}"]`);
+    if (!block) return;
+
+    const cluster = findClusterByKey(block, target.key);
+    if (!cluster) return;
+
+    toggleUnveilByKey(this.unveilStore.ensure(target.root), target.key, cluster);
+  }
+
+  private removeClickToggle() {
+    this.lastToggle = undefined;
+    if (this.clickToggleHandler) {
+      document.removeEventListener('click', this.clickToggleHandler, true);
+      this.clickToggleHandler = undefined;
+    }
+    if (this.doubleClickHandler) {
+      document.removeEventListener('dblclick', this.doubleClickHandler, true);
+      this.doubleClickHandler = undefined;
+    }
+  }
+
+  /* ========================================================================
+     三、揭晓态保活
+
+     揭晓写在 DOM 的 class 上，而思源会因编辑事务、页签切换重建块 DOM。
+     观察 childList 变化、按 protyle 收敛后合并回放，揭晓因此不丢。
+     只观察 childList：class 改动属 attributes，不会被自身回放再次触发。
+
+     调度用 setTimeout 而非 rAF：标签页不可见时浏览器会暂停 rAF，而期间
+     （例如后台关文档）累积的变更会让调度一直短路，回放停摆到页面重新可见。
+     ======================================================================== */
+
+  private initDomObserver() {
+    this.domObserver = new MutationObserver((records) => {
+      records.forEach((record) => {
+        const target = record.target.nodeType === Node.ELEMENT_NODE
+          ? (record.target as HTMLElement)
+          : record.target.parentElement;
+        const root = resolveProtyleRoot(target);
+        if (root) this.pendingUnveilRoots.add(root);
+      });
+      this.scheduleUnveilReplay();
+    });
+
+    this.domObserver.observe(document.body, { childList: true, subtree: true });
+  }
+
+  private removeDomObserver() {
+    if (this.domObserver) {
+      this.domObserver.disconnect();
+      this.domObserver = undefined;
+    }
+    if (this.unveilTimer) {
+      window.clearTimeout(this.unveilTimer);
+      this.unveilTimer = 0;
+    }
+    this.pendingUnveilRoots.clear();
+  }
+
+  private scheduleUnveilReplay() {
+    if (this.unveilTimer) return;
+    this.unveilTimer = window.setTimeout(() => {
+      this.unveilTimer = 0;
+      const roots = Array.from(this.pendingUnveilRoots);
+      this.pendingUnveilRoots.clear();
+      roots.forEach((root) => replayUnveilInto(this.unveilStore, root));
+    }, REPLAY_THROTTLE_MS);
+  }
+
+  /* ========================================================================
+     四、事件总线
      ======================================================================== */
 
   private initEventBus() {
+    // 静态阶段先挂上遮蔽开关，并补一次回放：只读/预览等路径只走静态渲染，
+    // 不会有 dynamic 事件。常规路径此时通常还没渲染出 kbd，回放会立刻早退。
     this.eventBus.on('loaded-protyle-static', (event) => {
-      this.handleProtyleLoaded(event.detail.protyle.element);
+      this.handleProtyleStatic(event.detail.protyle.element);
     });
 
+    // 动态就绪阶段再回放一次：页签切回、文档重载都走这里。
     this.eventBus.on('loaded-protyle-dynamic', (event) => {
-      this.handleProtyleLoaded(event.detail.protyle.element);
+      this.handleProtyleDynamic(event.detail.protyle.element);
+    });
+
+    // 文档关闭：显式注销该 protyle 的记录。
+    // 「关闭文档恢复默认遮蔽」由此成为一条确定的事件，而不是「元素会被 GC」的运气。
+    // detail 结构按类型包声明读取，但这里做防御：该包是社区维护的，若与内核实际
+    // 结构不符，抛错会让清理静默失效——正是这条监听要消灭的那种失效。
+    this.eventBus.on('destroy-protyle', (event) => {
+      const element = (event as any)?.detail?.protyle?.element;
+      if (element) this.unveilStore.drop(element);
     });
   }
 
-  private handleProtyleLoaded(containerEl: HTMLElement) {
+  private handleProtyleStatic(containerEl: HTMLElement) {
     const wysiwyg = containerEl.querySelector<HTMLElement>('.protyle-wysiwyg');
     if (!wysiwyg) return;
 
     wysiwyg.classList.toggle('sy-cloze-active', this.isClozeActive);
+    replayUnveilInto(this.unveilStore, containerEl);
+  }
+
+  private handleProtyleDynamic(containerEl: HTMLElement) {
+    const wysiwyg = containerEl.querySelector<HTMLElement>('.protyle-wysiwyg');
+    if (!wysiwyg) return;
+
+    wysiwyg.classList.toggle('sy-cloze-active', this.isClozeActive);
+    replayUnveilInto(this.unveilStore, containerEl);
     this.scheduleRevealUpdate();
   }
 
   /* ========================================================================
-     三、行内挖空命令（⌥Q，逻辑 100% 对齐思源原生 ⌥D）
+     五、行内挖空命令（⌥Q，逻辑 100% 对齐思源原生 ⌥D）
      ======================================================================== */
 
   /**
@@ -496,6 +674,11 @@ export default class ClozePlugin extends Plugin {
         const isFullyMarked = currentTypes.includes('kbd') || Boolean(targetKbd);
         const kbdBefore = startBlock.querySelectorAll(KBD_SELECTOR).length;
 
+        // 取消之前先把记录坐标取好：setInlineMark 之后块 DOM 可能被整体重建，
+        // 届时 startBlock 已脱离文档，再也问不出它属于哪个 protyle。
+        const unveilRoot = resolveProtyleRoot(startBlock);
+        const blockNodeId = startBlock.getAttribute('data-node-id');
+
         // 调用思源官方原生管道执行标准化处理（等价于原生 ⌥D）。
         // 不注入任何自定义属性：Markdown 序列化只保留 kbd 的文本内容，
         // 附加属性在保存/重载后必然丢失，故集群完全由渲染层可见内容连续性重建。
@@ -539,6 +722,9 @@ export default class ClozePlugin extends Plugin {
           duration = 2500;
         } else {
           msg = String(this.i18n.clozeRemoved || '已取消整块行内挖空遮罩');
+          // 遮罩已拆，该块的揭晓记录随之作废：不清理的话，同块内重新创建的遮罩
+          // 若答案文本恰好与旧记录相同，会一出现就是揭晓态。
+          dropUnveilForBlockId(this.unveilStore, unveilRoot, blockNodeId);
         }
         showMessage(msg, duration, 'info');
         return;
@@ -551,10 +737,18 @@ export default class ClozePlugin extends Plugin {
   }
 
   /* ========================================================================
-     四、全局显隐
+     六、全局显隐
+
+     ⌥X / 顶栏眼睛是全局开关，按下它就是「所有遮罩统一」：先把逐块点开的揭晓
+     痕迹全部作废，再翻转开关。于是关闭时全部可见、重新开启时全部遮蔽，
+     不会出现「一半显示一半遮蔽」。
      ======================================================================== */
 
   private toggleGlobalCloze() {
+    // 全局重置时把待撤回项一并作废：否则用户接着在正文里双击，会把刚清掉的块又翻回来。
+    this.lastToggle = undefined;
+    resetAllUnveil(this.unveilStore, document);
+
     this.isClozeActive = !this.isClozeActive;
     this.updateTopBarState();
     this.updateGlobalStyles();
@@ -597,11 +791,16 @@ export default class ClozePlugin extends Plugin {
       wysiwyg.classList.remove('sy-cloze-active');
     });
 
+    // 插件卸载后揭晓类失去 CSS 依托，留在 DOM 上只是垃圾，一并清掉。
+    document.querySelectorAll<HTMLElement>(`.${UNVEIL_CLASS}`).forEach((el) => {
+      el.classList.remove(UNVEIL_CLASS);
+    });
+
     this.clearReveal();
   }
 
   /* ========================================================================
-     五、设置面板
+     七、设置面板
      ======================================================================== */
 
   private initSettingsPanel() {
