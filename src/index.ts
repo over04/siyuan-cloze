@@ -7,6 +7,7 @@ import {
   findKbdInRange,
   getClozeCluster,
   getClusterKey,
+  markClusterMath,
   resolveClozeAnchor,
   resolveElement,
   resolveProtyleRoot,
@@ -451,7 +452,11 @@ export default class ClozePlugin extends Plugin {
         });
       });
 
-      blocks.forEach((block) => replayBlockUnveil(this.unveilStore, block));
+      blocks.forEach((block) => {
+        // 先打标再回放：公式提示线的类与下移量都要跟着这次变更后的 DOM 走。
+        markClusterMath(block);
+        replayBlockUnveil(this.unveilStore, block);
+      });
     });
 
     this.domObserver.observe(document.body, { childList: true, subtree: true });
@@ -495,6 +500,7 @@ export default class ClozePlugin extends Plugin {
     if (!wysiwyg) return;
 
     wysiwyg.classList.toggle('sy-cloze-active', this.isClozeActive);
+    this.markClusterMathIn(containerEl);
     replayUnveilInto(this.unveilStore, containerEl);
   }
 
@@ -503,8 +509,24 @@ export default class ClozePlugin extends Plugin {
     if (!wysiwyg) return;
 
     wysiwyg.classList.toggle('sy-cloze-active', this.isClozeActive);
+    this.markClusterMathIn(containerEl);
     replayUnveilInto(this.unveilStore, containerEl);
     this.scheduleRevealUpdate();
+  }
+
+  /**
+   * 给整篇里所有含遮罩的块打公式标记并量下移量。
+   *
+   * 只从 kbd 反查所属块，不遍历全部块：文档里绝大多数块没有遮罩，逐块 querySelectorAll
+   * 是白花的开销。同一个块里的多个 kbd 会被多次查到，用 Set 去重。
+   */
+  private markClusterMathIn(containerEl: HTMLElement) {
+    const blocks = new Set<Element>();
+    containerEl.querySelectorAll<HTMLElement>(KBD_SELECTOR).forEach((kbd) => {
+      const block = kbd.closest('[data-node-id]');
+      if (block) blocks.add(block);
+    });
+    blocks.forEach((block) => markClusterMath(block));
   }
 
   /* ========================================================================

@@ -23,6 +23,7 @@ import {
   getClozeCluster,
   getClusterKey,
   listBlockClusters,
+  markClusterMath,
   parseClusterKey,
   resolveProtyleRoot,
 } from '../src/cluster.ts';
@@ -1107,26 +1108,63 @@ test('JS 与 CSS 的契约：创建或取消遮罩不得顺手切换填空模式
   );
 });
 
-test('JS 与 CSS 的契约：提示线沿文字走，不穿公式', () => {  const stripped = scss.replace(/\/\*[\s\S]*?\*\//g, '');
+test('JS 与 CSS 的契约：提示线由 ::before 统一画，kbd 与公式共用一套机制', () => {
+  const stripped = scss.replace(/\/\*[\s\S]*?\*\//g, '');
   const rules = stripped.split('}');
-  const baseRule = rules.find(
-    (rule) => rule.includes('text-decoration-line') && rule.includes(KBD_SELECTOR),
+
+  // 两套机制（text-decoration 沿基线走 / border 落在盒底）高度天然不同，公式盒高又随内容变，
+  // 视觉上会断成几条。统一由 ::before 画在元素盒底，再用 JS 量出的下移量对齐到簇内容最低点。
+  const lineRule = rules.find(
+    (rule) => rule.includes('::before') && rule.includes('--sy-cloze-line-drop'),
+  );
+  assert.ok(lineRule, '提示线必须由 ::before 画，并用 JS 量出的下移量对齐');
+  assert.ok(
+    lineRule.includes(KBD_SELECTOR) && lineRule.includes('.sy-cloze-math'),
+    'kbd 与公式必须共用同一条画线规则，两套机制的高度对不齐',
+  );
+  assert.ok(
+    /border-bottom:\s*2px\s+dashed\s+var\(--b3-theme-primary/.test(lineRule),
+    '提示线要用主题色、2px 虚线',
   );
 
-  assert.ok(baseRule, '找不到基础外观规则');
   assert.ok(
-    !/border-bottom:\s*\d/.test(baseRule),
-    'border 围的是行盒，遮罩里嵌了矩阵这类高公式时会从公式中间横穿过去，得改用 text-decoration',
-  );
-  assert.ok(baseRule.includes('--b3-theme-primary'), '提示线要用主题色，深浅主题才都看得清');
-  assert.ok(
-    /text-decoration-thickness:\s*2px/.test(baseRule),
-    '提示线要够粗，1.5px 的虚线本身就看不清',
+    !/text-decoration(-line)?:\s*underline/.test(stripped),
+    'text-decoration 沿基线走，与公式盒底的高度对不齐，已被 ::before 取代',
   );
 
+  // 线在伪元素上，遮蔽态的隐藏也必须打在伪元素上——打在元素本身不起作用。
+  const hideRule = rules.find(
+    (rule) => rule.includes('body.sy-cloze-active') && rule.includes('::before'),
+  );
+  assert.ok(hideRule, '遮蔽态必须在 ::before 上把线置透明，打在元素本身不起作用');
   assert.ok(
-    rules.find((rule) => rule.includes('inline-math') && rule.includes('inline-block')),
-    'text-decoration 会传播进非原子行内级的后代，公式不钉成 inline-block 的话提示线照样横穿',
+    hideRule.includes(KBD_SELECTOR) && hideRule.includes('.sy-cloze-math'),
+    'kbd 与公式的线都要被遮蔽态藏掉',
+  );
+  assert.ok(
+    hideRule.includes(`:not(.${REVEAL_CLASS})`) && hideRule.includes(`:not(.${UNVEIL_CLASS})`),
+    '揭晓态与划选透晓态必须排除在外，线在那两种状态下要保持可见',
+  );
+
+  // 公式侧：类名由 JS 按簇计算打上，CSS 不再依赖相邻兄弟——相邻兄弟覆盖不到「kbd 公式 公式
+  // kbd」里排在后面的公式，还会误伤紧挨遮罩但不属于它的公式。
+  const mathRule = rules.find(
+    (rule) => rule.includes('.sy-cloze-math') && rule.includes('display: inline-block'),
+  );
+  assert.ok(mathRule, '公式要 inline-block，线才会落在公式盒底而不是行盒底');
+});
+
+test('JS 契约：簇成员公式的类与下移量由 markClusterMath 打上', () => {  const cluster = fs.readFileSync(path.join(repoRoot, 'src/cluster.ts'), 'utf8');
+  const source = fs.readFileSync(path.join(repoRoot, 'src/index.ts'), 'utf8');
+
+  assert.ok(/export const markClusterMath/.test(cluster), 'cluster.ts 必须导出 markClusterMath');
+  assert.ok(
+    /getBoundingClientRect\(\)\.bottom/.test(cluster),
+    '下移量要按元素实际盒底量，不能靠 CSS 猜',
+  );
+  assert.ok(
+    /markClusterMath\(block\)/.test(source) && /markClusterMathIn/.test(source),
+    'index.ts 必须在 DOM 变更与加载两个时机都打标，否则公式线会漏',
   );
 });
 
@@ -1144,5 +1182,42 @@ test('JS 契约：提交切换时不得按块 ID 直接取第一个元素', () =
   assert.ok(
     /target\.anchor\.isConnected\s*&&\s*target\.root\.contains\(target\.anchor\)/.test(source),
     '一级解析要校验锚点仍属于这个 root：块被移到别的编辑器时锚点依然 isConnected，只用它会把记录写进旧 root',
+  );
+});
+
+test('markClusterMath：簇内相邻的多个公式都打标，簇外公式不打标', () => {
+  // 公式是 kbd 的兄弟而不是后代，CSS 的相邻兄弟只能覆盖紧跟在 kbd 后面那一个。簇里连续
+  // 多个公式是常态（一个矩阵公式后面紧跟一个 ~ 符号的公式），所以打标必须按簇计算来。
+  const math = (content) =>
+    `<span data-type="inline-math" data-subtype="math" data-content="${content}" contenteditable="false" class="render-node">${WJ}</span>`;
+
+  const block = element(
+    `<div data-node-id="mk-1">${kbd('若')}${math('A')}${math('\\sim')}${kbd('B')}${math('孤')}</div>`,
+  );
+
+  markClusterMath(block);
+
+  const marked = Array.from(block.querySelectorAll('.sy-cloze-math')).map((el) =>
+    el.getAttribute('data-content'),
+  );
+  assert.deepEqual(marked, ['A', '\\sim'], '簇内两个相邻公式都要打标，簇外那个不打标');
+});
+
+test('markClusterMath：遮罩取消后公式的类要摘掉', () => {
+  const math = (content) =>
+    `<span data-type="inline-math" data-subtype="math" data-content="${content}" contenteditable="false" class="render-node">${WJ}</span>`;
+
+  const block = element(`<div data-node-id="mk-2">${kbd('若')}${math('A')}${kbd('则')}</div>`);
+  markClusterMath(block);
+  assert.equal(block.querySelectorAll('.sy-cloze-math').length, 1);
+
+  // 取消遮罩：kbd 被还原成普通文字，公式不再是簇成员。
+  block.querySelectorAll(KBD_SELECTOR).forEach((el) => el.replaceWith(...el.childNodes));
+  markClusterMath(block);
+
+  assert.equal(
+    block.querySelectorAll('.sy-cloze-math').length,
+    0,
+    '取消遮罩后公式就是普通公式了，标记必须摘掉，否则它会一直带着一条提示线',
   );
 });

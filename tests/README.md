@@ -84,7 +84,9 @@ MutationRecord 后半段时不会自愈。
 把 `mousedown` 改回 `click` → 「切换挂在 mousedown 上」失败；
 把遮蔽段的 `position: relative` 或外扩伪元素去掉 → 「遮蔽态的命中区要跟着模糊范围一起外扩」失败；
 把 `mouseup` / `click` 的吞事件监听去掉 → 「切换挂在 mousedown 上，命中时把整次交互吞掉」失败；
-把提示线改回 `border-bottom`，或去掉公式的 `inline-block` → 「提示线沿文字走，不穿公式」失败；
+把提示线改回 `text-decoration`，或把 kbd 与公式拆成两套画线机制 → 「提示线由 ::before 统一画」失败；
+把遮蔽态的隐藏从 `::before` 挪回元素本身 → 同一条用例失败；
+去掉 `markClusterMath` 的打标、或去掉它的摘类分支 → 「簇内相邻的多个公式都打标」/「遮罩取消后公式的类要摘掉」失败；
 在 `commitToggle` 里加回 `root.querySelector(\`[data-node-id=…]\`)` → 「提交切换时不得按块 ID 直接取第一个元素」失败；
 去掉一级的 `target.root.contains(target.anchor)` 校验 → 同一条用例失败；
 把 `this.isClozeActive = true` 加回去 → 「创建或取消遮罩不得顺手切换填空模式」失败。
@@ -103,7 +105,18 @@ MutationRecord 后半段时不会自愈。
 常态提示线用 `text-decoration` 而不是 `border-bottom`：`border` 围的是行盒，而行盒高度只跟
 文字的 `line-height` 走——遮罩里嵌了矩阵这类很高的行内公式时，线会从公式中间横穿过去。
 `text-decoration` 沿着文字基线走，公式再高也不受影响；配套给 `span[data-type~="inline-math"]`
-钉上 `display: inline-block`，否则装饰会传播进 KaTeX 那串普通 `span` 里照样横穿。
+公式是 kbd 的**兄弟**而不是后代：思源把一次挖空拆成多个 kbd 切片，行内公式是原子节点、kbd 无法
+跨越它，所以簇是「kbd 公式 kbd」这样的平级结构（见 cluster.ts 的兄弟遍历）。**不要用 CSS 选择器
+去找簇成员公式**：相邻兄弟 `+` 只能覆盖「kbd 紧跟一个公式」，覆盖不到「kbd 公式 公式 kbd」里排在
+后面的那些——而簇里连续多个公式是常态（一个矩阵公式后面紧跟一个 `~` 符号的公式），它还会误伤
+紧挨遮罩但不属于这个遮罩的公式；后代选择器则一个元素都命不中。簇成员由 `markClusterMath` 按同一
+套簇计算打上 `.sy-cloze-math`。
+
+提示线由 `::before` 统一画，kbd 与公式共用同一条规则。两套机制（`text-decoration` 沿基线走 /
+`border` 落在盒底）的高度天然不同，公式盒高又随内容变，视觉上会断成几条、且高低不一。统一画在
+元素盒底之后，再由 `markClusterMath` 量出每个成员到簇内容最低点的差值写进 `--sy-cloze-line-drop`，
+把较矮的成员下移，整簇落在同一条水平线上。公式必须是 `inline-block`，否则 border 落在行盒底、
+跨行还会分段。遮蔽态的隐藏也要打在 `::before` 上——线在伪元素上，打在元素本身不起作用。
 
 提交切换时不得按块 ID 在根里 `querySelector`：同一个块 ID 在 protyle 根里可能同时存在多个
 元素（实测 3 个），拿到的第一个未必是含遮罩的那份，`listBlockClusters` 会算出空簇，

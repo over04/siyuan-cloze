@@ -12,14 +12,8 @@
 .b3-typography span[data-type~="kbd"] {
   background: transparent !important;
   border: none !important;
-  /* 常态提示线用 text-decoration 而不是 border-bottom：border 围的是行盒，而行盒高度
-     只跟文字的 line-height 走——遮罩里嵌了矩阵这类很高的行内公式时，线会从公式中间
-     横穿过去。text-decoration 沿着文字的基线走，公式再高也不受影响。 */
-  text-decoration-line: underline !important;
-  text-decoration-style: dashed !important;
-  text-decoration-color: var(--b3-theme-primary, rgba(130, 130, 130, 0.85)) !important;
-  text-decoration-thickness: 2px !important;
-  text-underline-offset: 3px !important;
+  /* 提示线交给 ::before 画（规则见下），这里只留定位参照。::after 已被遮蔽态的命中区外扩占用。 */
+  position: relative !important;
   box-shadow: none !important;
   outline: none !important;
   border-radius: 2px !important;
@@ -39,9 +33,31 @@
 /* text-decoration 会传播进所有非原子行内级的后代，而 KaTeX 渲染出来是一串普通 span，
    不钉住的话提示线照样横穿公式。行内公式本来就是原子行内级，显式钉成 inline-block
    不会改变它自身的排版。 */
-.protyle-wysiwyg span[data-type~="kbd"] span[data-type~="inline-math"],
-.b3-typography span[data-type~="kbd"] span[data-type~="inline-math"] {
+/* 提示线统一由 ::before 伪元素画，kbd 与公式共用同一套机制——两套机制（text-decoration 沿
+   基线走 / border 落在盒底）的高度天然不同，视觉上会断成几条。这里把线钉在元素盒底，再用
+   JS 量出的 --sy-cloze-line-drop 把较矮的成员下移到与簇内最低者齐平，整簇落在同一条水平线上。 */
+.protyle-wysiwyg span[data-type~="kbd"]::before,
+.b3-typography span[data-type~="kbd"]::before,
+.protyle-wysiwyg span.sy-cloze-math::before,
+.b3-typography span.sy-cloze-math::before {
+  content: '' !important;
+  position: absolute !important;
+  left: 0 !important;
+  right: 0 !important;
+  bottom: calc(0px - var(--sy-cloze-line-drop, 0px)) !important;
+  border-bottom: 2px dashed var(--b3-theme-primary, rgba(130, 130, 130, 0.85)) !important;
+}
+
+/* 公式是 kbd 的兄弟，不是后代：思源把一次挖空拆成多个 kbd 切片，行内公式是原子节点、
+   kbd 无法跨越它，所以簇是「kbd 公式 kbd」这样的平级结构（见 cluster.ts 的兄弟遍历）。
+   类名由 markClusterMath 按同一套簇计算精确打上——CSS 的相邻兄弟只能覆盖「kbd 紧跟一个
+   公式」，覆盖不到「kbd 公式 公式 kbd」里排在后面的那些，还会误伤紧挨遮罩但不属于它的公式。 */
+.protyle-wysiwyg span.sy-cloze-math,
+.b3-typography span.sy-cloze-math {
+  /* 只有 inline-block 才让提示线落在公式盒底——保持 inline 的话 border 会画在行盒底，
+     跨行时还会分段，等于回到「线横穿公式」的老问题。 */
   display: inline-block !important;
+  position: relative !important;
 }
 
 /* 手型光标只在遮蔽开启时出现，提示「这里可以点」。写在独立的、不含 :not() 的
@@ -79,8 +95,14 @@ body.sy-cloze-active span[data-type~="kbd"]:not(.sy-cloze-reveal):not(.sy-cloze-
   /* 给下面那个外扩命中区的伪元素留一个定位参照。 */
   position: relative !important;
 
-  /* 遮蔽态把提示线一起藏掉。 */
-  text-decoration-color: transparent !important;
+  /* 遮蔽态的提示线由下面那条 ::before 规则置透明，这里不重复。 */
+}
+
+/* 遮蔽态把线藏掉。线挂在 ::before 上，隐藏也必须打在 ::before 上；
+   揭晓态与划选透晓态被排除在外，线保持可见。 */
+body.sy-cloze-active span[data-type~="kbd"]:not(.sy-cloze-reveal):not(.sy-cloze-unveiled)::before,
+body.sy-cloze-active span.sy-cloze-math:not(.sy-cloze-reveal):not(.sy-cloze-unveiled)::before {
+  border-bottom-color: transparent !important;
 }
 
 /* 遮蔽态的命中区外扩。
