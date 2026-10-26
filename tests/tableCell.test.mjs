@@ -13,6 +13,9 @@
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 import { WJ, ZW, setupDom } from './helpers.mjs';
 import {
@@ -170,6 +173,29 @@ test('matchHotkey 按思源口径匹配修饰键', () => {
   assert.equal(matchHotkey('⌥Q', keyEvent({ altKey: true, shiftKey: true }), false), false);
   // ⌥ 组合在部分平台会改写 event.key，靠 event.code 兜底
   assert.equal(matchHotkey('⌥Q', keyEvent({ altKey: true, key: 'º' }), true), true);
+});
+
+test('默认快捷键：⇧⌘C 创建、⌥⇧X 显隐', () => {
+  const cKey = (over) => keyEvent({ key: 'C', code: 'KeyC', shiftKey: true, ...over });
+  assert.equal(matchHotkey('⇧⌘C', cKey({ metaKey: true }), true), true);
+  assert.equal(matchHotkey('⇧⌘C', cKey({ ctrlKey: true }), false), true);
+  assert.equal(matchHotkey('⇧⌘C', cKey({ metaKey: true, altKey: true }), true), false);
+
+  const xKey = keyEvent({ key: 'X', code: 'KeyX', altKey: true, shiftKey: true });
+  assert.equal(matchHotkey('⌥⇧X', xKey, true), true);
+  assert.equal(matchHotkey('⌥⇧X', xKey, false), true);
+  assert.equal(matchHotkey('⌥⇧X', keyEvent({ key: 'X', code: 'KeyX', altKey: true }), false), false);
+});
+
+test('工具栏项默认键位与唯一创建入口写死在插件源码里', () => {
+  const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+  const source = fs.readFileSync(path.join(repoRoot, 'src/index.ts'), 'utf8');
+
+  assert.match(source, /hotkey: '⇧⌘C'/, '创建/取消默认键必须是 ⇧⌘C');
+  assert.match(source, /hotkey: '⌥⇧X'/, '全局显隐默认键必须是 ⌥⇧X');
+  assert.match(source, /name: 'cloze'/, '必须注册工具栏入口');
+  assert.doesNotMatch(source, /langKey: 'createCloze'/, '创建动作不得再注册成第二条命令');
+  assert.doesNotMatch(source, /ensureTopBarCreate/, '不得再注册顶栏或菜单兜底入口');
 });
 
 test('matchHotkey 处理 ⌘ 与 ⌃ 的平台差异', () => {

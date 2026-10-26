@@ -325,7 +325,7 @@ test('replayUnveilInto：失效记录要连续两轮确认才清理', () => {
   toggleClusterUnveil(records, block, getClozeCluster(kbdsOf(block)[0]));
   assert.equal(records.size, 1);
 
-  // 原生 ⌥D 取消遮罩 / 撤销创建 / 直接改文本：记录里留下一个当前 DOM 已无对应簇的键。
+  // 原生行内标记 取消遮罩 / 撤销创建 / 直接改文本：记录里留下一个当前 DOM 已无对应簇的键。
   const rebuilt = blockWith('blk', kbd('丙'));
   block.replaceWith(rebuilt);
 
@@ -477,8 +477,8 @@ test('forgetBlockOrder：丢掉基线后，同位置的相似新遮罩不得继�
 
   clickUnveil(store, protyle, block, kbdsOf(block)[0]);
 
-  // 取消遮罩（等价于原生 ⌥D）之后又在原位置挖空一段相似文本。位置级认不出这两者的
-  // 差别，所以 ⌥Q 路径会主动丢掉基线，下一次回放只做精确匹配。
+  // 取消遮罩（等价于原生行内标记）之后又在原位置挖空一段相似文本。位置级认不出这两者的
+  // 差别，所以 ⇧⌘C 路径会主动丢掉基线，下一次回放只做精确匹配。
   forgetBlockOrder(store, protyle, 'blk');
   block.innerHTML = kbd('甲子') + ' ' + kbd('乙');
   replayUnveilInto(store, protyle);
@@ -609,7 +609,7 @@ test('replayUnveilInto：删掉一个遮罩后，同块内文本相似却从未�
   assert.ok(kbdsOf(block)[0].classList.contains(UNVEIL_CLASS));
   assert.ok(!kbdsOf(block)[1].classList.contains(UNVEIL_CLASS));
 
-  // 用户把「甲」那个遮罩整个删掉（等价于原生 ⌥D 取消遮罩后 kbd 消失）。
+  // 用户把「甲」那个遮罩整个删掉（等价于原生行内标记 取消遮罩后 kbd 消失）。
   // 块内簇数从 2 变 1，位置已经错开，此时绝不能把那条记录交给「甲子」——
   // 那等于把答案亮在一个用户从没点开过的位置上。
   block.innerHTML = kbd('甲子');
@@ -875,7 +875,7 @@ test('replayUnveilInto：blocked 清空记录后不得把揭晓类留在元素�
   assert.equal(unveiledCount(protyle), 0, '再跑两轮也不得复活');
 });
 
-test('resetAllUnveil：⌥X 重置要连待摘标记一起清', () => {
+test('resetAllUnveil：⌥⇧X 重置要连待摘标记一起清', () => {
   const store = new UnveilStore();
   const { protyle, block } = mountProtyle('blk', kbd('甲') + ' ' + kbd('乙'));
 
@@ -1100,7 +1100,7 @@ test('JS 与 CSS 的契约：切换挂在 mousedown 上，命中时把整次交�
 test('JS 与 CSS 的契约：创建或取消遮罩不得顺手切换填空模式', () => {
   const source = fs.readFileSync(path.join(repoRoot, 'src/index.ts'), 'utf8');
 
-  // 模式只由顶栏眼睛与 ⌥X 控制。之前「新建一处遮罩就把整篇切进填空模式」会让只想取消
+  // 模式只由顶栏眼睛与 ⌥⇧X 控制。之前「新建一处遮罩就把整篇切进填空模式」会让只想取消
   // 遮罩、却因选区没被识别成 kbd 而走了创建路径的用户，莫名其妙换了一整篇的模式。
   assert.ok(
     !/this\.isClozeActive\s*=\s*true/.test(source),

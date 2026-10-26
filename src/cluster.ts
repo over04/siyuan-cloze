@@ -21,7 +21,7 @@ export const ZW_ONLY_TEXT = /^[\u200b\u2060\ufeff]*$/u;
 
 /**
  * 宽松口径：连真实空白也算不可见。只用于「光标停在 kbd 紧邻的边界文本节点上」
- * 这一处归属判定，让遮罩右侧还带一个空格时 ⌥Q 依然点入即撤。
+ * 这一处归属判定，让遮罩右侧还带一个空格时 ⇧⌘C 依然点入即撤。
  */
 export const INVISIBLE_TEXT = /^[\s\u200b\u2060\ufeff]*$/u;
 
@@ -34,7 +34,7 @@ export const CLUSTER_MATH_CLASS = 'sy-cloze-math';
 /** 簇内每个成员的下移量（CSS 变量名），由 markClusterMath 量出来。 */
 export const LINE_DROP_VAR = '--sy-cloze-line-drop';
 
-/** 悬停/划选时加在整簇每个成员上的显晓类，由 index.scss 的 :not() 反向生效。 */
+/** 划选时加在整簇每个成员上的透晓类，由 index.scss 的 :not() 反向生效。 */
 export const REVEAL_CLASS = 'sy-cloze-reveal';
 
 export const isKbd = (node: Node): node is HTMLElement =>
@@ -71,8 +71,8 @@ export const isClozeBridge = (node: Node): boolean => {
  *   - 行内公式先挂起，只有在其之后（同方向）又遇到 kbd 时才入列，
  *     即「被两侧 kbd 夹住」的公式才算集群成员。
  *
- * 公式必须入列：否则悬停联动类永远加不到公式上，会出现
- * 「悬停左侧公式整簇显晓、悬停右侧 kbd 只有 kbd 显晓」的单向缺陷。
+ * 公式必须入列：否则整簇透晓类加不到公式上，会出现
+ * 「选中左侧公式整簇透晓、选中右侧 kbd 只有 kbd 透晓」的单向缺陷。
  *
  * 断簇条件：遇到任何既非 kbd、也非桥接的内容立即终止。真实空白同样算可见
  * 内容——这正是「分两次创建就是两个遮罩」的判据：两次划选之间没被选中的
@@ -150,7 +150,7 @@ export const scanAdjacentCloze = (from: Node, direction: 'prev' | 'next'): HTMLE
  *   1. 直接命中 kbd 切片（含被标记为 inline-math kbd 的行内公式）；
  *   2. 命中「被两侧 kbd 夹住」的行内公式。
  *
- * 未被夹住的独立公式不归属任何集群——否则鼠标划过普通公式时会连带显晓
+ * 未被夹住的独立公式不归属任何集群——否则点击普通公式时会连带揭晓
  * 其相邻挖空的答案，在背诵模式下造成信息泄漏。
  */
 export const resolveClozeAnchor = (node: Node | null): HTMLElement | null => {
@@ -199,6 +199,39 @@ export const findKbdInRange = (range: Range, block: Element | null): HTMLElement
     }
   }
   return null;
+};
+
+/**
+ * 找出与划选范围相交的全部挖空簇，按 DOM 顺序返回。
+ *
+ * 取消遮罩时一次处理整段选区：用户选中多个遮罩再按快捷键，应当把选中的
+ * 都取消，而不是只取消第一个。簇之间可能夹着普通内容，调用方按首尾成员
+ * 扩展 Range 后交给 setInlineMark 统一清除。
+ */
+export const findClustersInRange = (range: Range, block: Element | null): HTMLElement[][] => {
+  const scope: ParentNode = block || document;
+  const kbds = scope.querySelectorAll<HTMLElement>(KBD_SELECTOR);
+  const handled = new Set<HTMLElement>();
+  const clusters: HTMLElement[][] = [];
+
+  for (let i = 0; i < kbds.length; i++) {
+    const kbd = kbds[i];
+    if (handled.has(kbd)) continue;
+
+    let hit = false;
+    try {
+      hit = range.intersectsNode(kbd);
+    } catch {
+      hit = false;
+    }
+    if (!hit) continue;
+
+    const cluster = getClozeCluster(kbd);
+    cluster.forEach((el) => handled.add(el));
+    clusters.push(cluster);
+  }
+
+  return clusters;
 };
 
 /* ==========================================================================
@@ -255,7 +288,7 @@ export interface BlockCluster {
  *
  * 为什么不用「簇首切片在块内的序号」：块内每增删一个遮罩，所有旧序号都会整体
  * 往后挪，记录也就跟着对错了地方。实际遇到的序列——段落 `前言 甲 乙`，点击
- * 「甲」揭晓（记录 `blk#0`），再选中「前言」按 ⌥Q 新建遮罩，`blk#0` 就落到了
+ * 「甲」揭晓（记录 `blk#0`），再选中「前言」按 ⇧⌘C 新建遮罩，`blk#0` 就落到了
  * 新遮罩头上：新遮罩一出现就是揭晓状态（背诵时等于直接把答案摆出来），而「甲」
  * 的编号变成 `blk#1`、记录里没有，被回放重新遮蔽。改用答案文本则不受同块内
  * 增删影响，这类错位从根上消失。

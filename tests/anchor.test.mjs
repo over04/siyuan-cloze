@@ -13,6 +13,7 @@ import {
   KBD_SELECTOR,
   MATH_SELECTOR,
   REVEAL_CLASS,
+  findClustersInRange,
   findKbdInRange,
   isKbd,
   isMath,
@@ -139,6 +140,27 @@ test('findKbdInRange：选区完全不碰 kbd 时返回 null', () => {
   range.setEnd(tail, 2);
 
   assert.equal(findKbdInRange(range, block), null);
+});
+
+test('findClustersInRange：一次返回选区内的全部遮罩簇', () => {
+  const block = parseBlock(kbd('1') + ' 2 ' + kbd('3'));
+  const range = document.createRange();
+  range.setStart(block.firstChild.firstChild, 0);
+  range.setEnd(block.lastChild.firstChild, 1);
+
+  const clusters = findClustersInRange(range, block);
+  assert.equal(clusters.length, 2);
+  assert.equal(clusters[0][0], block.children[0]);
+  assert.equal(clusters[1][0], block.children[1]);
+});
+
+test('findClustersInRange：选区不碰遮罩时返回空数组', () => {
+  const block = parseBlock(kbd('1') + ' 2 ' + kbd('3'));
+  const range = document.createRange();
+  range.setStart(block.childNodes[1], 1);
+  range.setEnd(block.childNodes[1], 2);
+
+  assert.deepEqual(findClustersInRange(range, block), []);
 });
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');

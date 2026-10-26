@@ -123,7 +123,7 @@ body.sy-cloze-active span[data-type~="kbd"]:not(.sy-cloze-reveal):not(.sy-cloze-
 /* ==========================================================================
    三、过渡：只在用户主动切换时生效
 
-   点击揭晓、⌥X 全局切换时，JS 会给受影响的 kbd 挂上 .sy-cloze-animating，
+   点击揭晓、⌥⇧X 全局切换时，JS 会给受影响的 kbd 挂上 .sy-cloze-animating，
    一小段后自动摘掉（unveil.ts 的 animateCluster）。回放补类不带它，因此思源
    重建 DOM 不会产生任何可见动画——那正是「每输入一次闪一下」的来源。
    ========================================================================== */
@@ -131,4 +131,10 @@ body.sy-cloze-active span[data-type~="kbd"]:not(.sy-cloze-reveal):not(.sy-cloze-
 span[data-type~="kbd"].sy-cloze-animating,
 span[data-type~="kbd"].sy-cloze-animating * {
   transition: filter 0.25s ease-in-out, opacity 0.25s ease-in-out !important;
+}
+
+/* 顶栏眼睛与移动端插件菜单项：开/关换图标之外，再给一个主色提示。 */
+.toolbar__item.protyle-icon--active,
+.b3-menu__item.protyle-icon--active {
+  color: var(--b3-theme-primary) !important;
 }

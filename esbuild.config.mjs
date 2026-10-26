@@ -32,6 +32,8 @@ function copyAssets() {
 function makeZip() {
   if (!fs.existsSync('dist/plugin.json')) return;
   try {
+    // zip -r 只增改不删除；先移除旧包，避免 dist 删文件后旧条目残留。
+    fs.rmSync(path.resolve('package.zip'), { force: true });
     execSync('cd dist && zip -r ../package.zip .', { stdio: 'ignore' });
     console.log('[zip] generated package.zip');
   } catch (err) {

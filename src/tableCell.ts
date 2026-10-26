@@ -204,7 +204,7 @@ const matchesMainKey = (main: string, event: HotkeyEvent): boolean => {
 };
 
 /**
- * 匹配思源格式的快捷键字符串（如 ⌥Q、⌘⇧F、⌃D）。
+ * 匹配思源格式的快捷键字符串（如 ⇧⌘C、⌘⇧F、⌃D）。
  *
  * 口径对齐思源 util/keymapBindings.normalizeShortcutKey：非 mac 平台把 ⌃ 前缀
  * 归一成 ⌘ 语义；而 ⌘ 在非 mac 上落到 ctrlKey、在 mac 上落到 metaKey。

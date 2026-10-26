@@ -1,10 +1,12 @@
 import { Plugin, showMessage, Setting, getActiveEditor } from 'siyuan';
 import {
+  CLUSTER_MATH_CLASS,
   INVISIBLE_TEXT,
   KBD_SELECTOR,
+  LINE_DROP_VAR,
   REVEAL_CLASS,
   UNVEIL_CLASS,
-  findKbdInRange,
+  findClustersInRange,
   getClozeCluster,
   getClusterKey,
   markClusterMath,
@@ -13,6 +15,7 @@ import {
   resolveProtyleRoot,
 } from './cluster';
 import {
+  HIDING_CLASS,
   UnveilStore,
   dropUnveilForBlockId,
   findClusterByKey,
@@ -36,6 +39,13 @@ import {
   parseHotkeyBindings,
 } from './tableCell';
 
+/** 创建/取消挖空的工具栏图标。 */
+const CLOZE_ICON = `<symbol id="iconCloze" viewBox="0 0 32 32">
+  <rect x="5" y="7" width="22" height="18" rx="4" fill="none" stroke="currentColor" stroke-width="2"/>
+  <path d="M9 21L23 11" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+  <circle cx="11" cy="12" r="1.5" fill="currentColor"/>
+</symbol>`;
+
 export interface PluginSettings {
   defaultHide: boolean;
 }
@@ -50,7 +60,6 @@ export default class ClozePlugin extends Plugin {
   private settings: PluginSettings = { ...DEFAULT_SETTINGS };
   private isClozeActive: boolean = true;
   private topBarElement?: HTMLElement;
-
   /** 当前已挂上划选透晓类的元素，用于差分增删，避免每次全量 classList 抖动。 */
   private revealedElements: HTMLElement[] = [];
   private revealRaf = 0;
@@ -82,6 +91,10 @@ export default class ClozePlugin extends Plugin {
   private domObserver?: MutationObserver;
   /** 单元格编辑态下的快捷键兜底监听（捕获阶段）。 */
   private cellShortcutHandler?: (e: KeyboardEvent) => void;
+  /** 移动端键盘工具栏的插件项点击监听。 */
+  private pluginToolbarClickHandler?: (e: Event) => void;
+  private pluginToolbarTouchStart?: { x: number; y: number; moved: boolean };
+  private pluginToolbarTouchAt = 0;
 
   async onload() {
     console.log('[Cloze] Initializing SiYuan Lossless Inline Cloze Plugin...');
@@ -89,8 +102,10 @@ export default class ClozePlugin extends Plugin {
 
     this.isClozeActive = this.settings.defaultHide;
 
+    this.addIcons(CLOZE_ICON);
     this.initTopBar();
     this.initCommands();
+    this.initToolbarItem();
     this.initSettingsPanel();
     this.initEventBus();
     this.initSelectionReveal();
@@ -103,6 +118,10 @@ export default class ClozePlugin extends Plugin {
 
   onunload() {
     console.log('[Cloze] Unloading SiYuan Lossless Inline Cloze Plugin...');
+    if (typeof (this as any).removeToolbarItem === 'function') {
+      (this as any).removeToolbarItem('cloze');
+    }
+    this.removeMobileToolbarItem();
     this.removeCellShortcutFallback();
     this.removeDomObserver();
     this.removeClickToggle();
@@ -123,25 +142,11 @@ export default class ClozePlugin extends Plugin {
   }
 
   private initCommands() {
-    // 快捷键 ⌥Q：多选与单选逻辑 100% 对照思源原生高光 (⌥D) 标准化对齐
-    this.addCommand({
-      langKey: 'createCloze',
-      langText: String(this.i18n.createCloze || '创建/取消行内挖空 (对齐⌥D)'),
-      hotkey: '⌥Q',
-      editorCallback: (protyle: any) => {
-        this.handleStandardClozeAction(protyle);
-      },
-      callback: () => {
-        const editor = getActiveEditor();
-        this.handleStandardClozeAction(editor ? (editor as any).protyle : null);
-      },
-    });
-
-    // 快捷键 ⌥X：专职切换全局背诵显隐
+    // 快捷键 ⌥⇧X：专职切换全局背诵显隐
     this.addCommand({
       langKey: 'toggleCloze',
       langText: String(this.i18n.toggleCloze || '切换完形填空显隐'),
-      hotkey: '⌥X',
+      hotkey: '⌥⇧X',
       callback: () => {
         this.toggleGlobalCloze();
       },
@@ -149,11 +154,106 @@ export default class ClozePlugin extends Plugin {
   }
 
   /**
+   * 编辑器工具栏入口。
+   *
+   * 桌面端显示在选区工具栏，移动端由思源插到键盘工具栏；同一个注册项，
+   * 不额外注册顶栏或菜单入口。
+   */
+  private initToolbarItem() {
+    const addToolbarItem = (this as any).addToolbarItem;
+    if (typeof addToolbarItem !== 'function') return;
+
+    addToolbarItem.call(this, {
+      name: 'cloze',
+      icon: 'iconCloze',
+      hotkey: '⇧⌘C',
+      tip: String(this.i18n.createClozeTip || '创建/取消行内挖空'),
+      click: (protyle: any) => {
+        this.handleStandardClozeAction(protyle, false, undefined, true);
+      },
+    });
+
+    this.bindMobileToolbarItem();
+  }
+
+  /**
+   * 移动端键盘工具栏只把插件项渲染成按钮，没有把自定义项的 click 分发出去。
+   * 这里补一个捕获阶段监听，直接接管 data-plugin-toolbar="true" 的挖空按钮。
+   */
+  private bindMobileToolbarItem() {
+    if (this.pluginToolbarClickHandler) return;
+
+    this.pluginToolbarClickHandler = (event: Event) => {
+      if (event.type === 'touchmove') {
+        const start = this.pluginToolbarTouchStart;
+        const touch = (event as TouchEvent).touches[0];
+        if (start && touch && Math.hypot(touch.clientX - start.x, touch.clientY - start.y) > 10) {
+          start.moved = true;
+        }
+        return;
+      }
+
+      const target = event.target instanceof Element ? event.target : null;
+      const button = target?.closest<HTMLElement>('[data-plugin-toolbar="true"][data-type="cloze"]');
+      if (!button || !button.closest('#keyboardToolbar')) {
+        if (event.type === 'touchend') this.pluginToolbarTouchStart = undefined;
+        return;
+      }
+
+      if (event.type === 'touchstart') {
+        const touch = (event as TouchEvent).touches[0];
+        this.pluginToolbarTouchStart = touch
+          ? { x: touch.clientX, y: touch.clientY, moved: false }
+          : undefined;
+        return;
+      }
+
+      if (event.type === 'touchend') {
+        const start = this.pluginToolbarTouchStart;
+        this.pluginToolbarTouchStart = undefined;
+        // 横向滑动工具栏时不要误触发创建/取消。
+        if (!start || start.moved) return;
+        this.pluginToolbarTouchAt = Date.now();
+      } else if (event.type === 'click') {
+        // touchend 已经处理过时，忽略随后补发的 click。
+        if (Date.now() - this.pluginToolbarTouchAt < 500) {
+          event.preventDefault();
+          event.stopImmediatePropagation();
+          return;
+        }
+      }
+
+      event.preventDefault();
+      event.stopImmediatePropagation();
+
+      const editor = getActiveEditor();
+      const protyle = editor ? (editor as any).protyle : (window as any)?.siyuan?.mobile?.editor?.protyle ?? null;
+      this.handleStandardClozeAction(protyle, false, undefined, true);
+    };
+
+    document.addEventListener('touchstart', this.pluginToolbarClickHandler, true);
+    document.addEventListener('touchmove', this.pluginToolbarClickHandler, true);
+    document.addEventListener('touchend', this.pluginToolbarClickHandler, true);
+    document.addEventListener('click', this.pluginToolbarClickHandler, true);
+  }
+
+  private removeMobileToolbarItem() {
+    if (!this.pluginToolbarClickHandler) return;
+    document.removeEventListener('touchstart', this.pluginToolbarClickHandler, true);
+    document.removeEventListener('touchmove', this.pluginToolbarClickHandler, true);
+    document.removeEventListener('touchend', this.pluginToolbarClickHandler, true);
+    document.removeEventListener('click', this.pluginToolbarClickHandler, true);
+    this.pluginToolbarClickHandler = undefined;
+    this.pluginToolbarTouchStart = undefined;
+    this.pluginToolbarTouchAt = 0;
+  }
+
+  /**
    * 单元格编辑态下的快捷键兜底。
    *
    * 思源的编辑器快捷键分发（commonHotkey → dispatchPluginShortcut）绑在**外层**
    * .protyle-wysiwyg 上；单元格编辑器只把键盘事件转发到 owner.element（protyle 根元素，
-   * 是 .protyle-wysiwyg 的祖先），转发事件不经过那个监听点，插件命令因此永远不会被
+   * 是 .protyle-wysiwyg 的祖先），转发事件不经过那个监听点，插件快捷键因此永远不会被
    * 分发——用户按了快捷键毫无反应，连提示都没有。ProtyleLite 自身
    * pluginExtensions: false，也不会代分发。所以这里在捕获阶段自己接管。
    *
@@ -188,11 +288,11 @@ export default class ClozePlugin extends Plugin {
     }
   }
 
-  /** 取用户实际绑定的快捷键（在思源设置里改过就用改过的），没有绑定则回落默认 ⌥Q。 */
+  /** 取工具栏项实际绑定的快捷键（在思源设置里改过就用改过的），没有绑定则回落默认 ⇧⌘C。 */
   private matchesClozeHotkey(event: KeyboardEvent): boolean {
-    const keymap = (window as any)?.siyuan?.config?.keymap?.plugin?.[this.name]?.['createCloze'];
+    const keymap = (window as any)?.siyuan?.config?.keymap?.plugin?.[this.name]?.['cloze'];
     const bindings = parseHotkeyBindings(keymap);
-    const list = bindings.length > 0 ? bindings : ['⌥Q'];
+    const list = bindings.length > 0 ? bindings : ['⇧⌘C'];
     return list.some((hotkey) => matchHotkey(hotkey, event, isMacPlatform()));
   }
 
@@ -259,8 +359,12 @@ export default class ClozePlugin extends Plugin {
     if (!selection || selection.rangeCount === 0 || selection.isCollapsed) return;
 
     const range = selection.getRangeAt(0);
+    const root = resolveProtyleRoot(range.startContainer);
+    if (!root) return;
 
-    document.querySelectorAll<HTMLElement>(KBD_SELECTOR).forEach((kbd) => {
+    // 只扫当前编辑器：selectionchange 在拖动选择时每帧都会触发，扫全篇会把
+    // 其它页签、表格单元格里的遮罩一起算进来，手机上尤其容易拖慢。
+    root.querySelectorAll<HTMLElement>(KBD_SELECTOR).forEach((kbd) => {
       let hit = false;
       try {
         hit = range.intersectsNode(kbd);
@@ -530,7 +634,7 @@ export default class ClozePlugin extends Plugin {
   }
 
   /* ========================================================================
-     五、行内挖空命令（⌥Q，逻辑 100% 对齐思源原生 ⌥D）
+     五、行内挖空动作（⇧⌘C，选区语义对齐思源 setInlineMark）
      ======================================================================== */
 
   /**
@@ -548,7 +652,7 @@ export default class ClozePlugin extends Plugin {
   ) {
     const cell = cellEditor.closest(CELL_SELECTOR);
     if (!cell) {
-      showMessage('未能在单元格内定位选区，请重新选择', 2000, 'info');
+      showMessage(String(this.i18n.cellSelectionNotFound || '未能在单元格内定位选区，请重新选择'), 2000, 'info');
       return;
     }
 
@@ -559,7 +663,7 @@ export default class ClozePlugin extends Plugin {
     const start = getVisibleOffset(contentRoot, range.startContainer, range.startOffset);
     const end = getVisibleOffset(contentRoot, range.endContainer, range.endOffset);
     if (start < 0 || end < 0) {
-      showMessage('未能在单元格内定位选区，请重新选择', 2000, 'info');
+      showMessage(String(this.i18n.cellSelectionNotFound || '未能在单元格内定位选区，请重新选择'), 2000, 'info');
       return;
     }
 
@@ -571,20 +675,20 @@ export default class ClozePlugin extends Plugin {
 
     window.requestAnimationFrame(() => {
       if (!cell.isConnected) {
-        showMessage('单元格已失效，请重新选择', 2000, 'info');
+        showMessage(String(this.i18n.cellInvalid || '单元格已失效，请重新选择'), 2000, 'info');
         return;
       }
 
       // rich 形态：单元格内容已按持久化的复杂块存着，外层 setInlineMark 依然不适用。
       // 如实告知，而不是硬闯出一次事务错误。
       if (isRichCell(cell)) {
-        showMessage('该单元格内容较复杂，请退出单元格编辑后再按 ⌥Q', 2500, 'info');
+        showMessage(String(this.i18n.cellRich || '该单元格内容较复杂，请退出单元格编辑后再试'), 2500, 'info');
         return;
       }
 
       const restored = createRangeByVisibleOffset(cell, start, end);
       if (!restored) {
-        showMessage('选区恢复失败，请重新选择', 2000, 'info');
+        showMessage(String(this.i18n.cellRestoreFailed || '选区恢复失败，请重新选择'), 2000, 'info');
         return;
       }
 
@@ -595,19 +699,55 @@ export default class ClozePlugin extends Plugin {
   }
 
   /**
+   * 取本次操作真正要用的 Range。
+   *
+   * 移动端键盘工具栏、命令面板弹出时，编辑区可能已经失焦，window.getSelection()
+   * 会折叠甚至清空；思源自己的格式按钮用的是 protyle.toolbar.range 这份快照。
+   * 这里按可信度取：调用方显式传入的 Range → 当前选区 → 工具栏快照。
+   * 工具栏按钮场景显式要求先用快照，避免当前折叠光标把用户原来的划选覆盖掉。
+   */
+  private resolveActionRange(protyle: any, preferredRange?: Range, preferSaved = false): Range | null {
+    const root = protyle?.wysiwyg?.element as HTMLElement | undefined;
+    const valid = (range?: Range | null): range is Range => {
+      if (!range || !range.startContainer?.isConnected || !range.endContainer?.isConnected) return false;
+      return !root || (root.contains(range.startContainer) && root.contains(range.endContainer));
+    };
+
+    if (valid(preferredRange)) return preferredRange.cloneRange();
+
+    const selection = window.getSelection();
+    const current = selection && selection.rangeCount > 0 ? selection.getRangeAt(0) : null;
+    const saved = protyle?.toolbar?.range as Range | undefined;
+
+    if (preferSaved && valid(saved)) return saved.cloneRange();
+    if (valid(current)) return current.cloneRange();
+    if (valid(saved)) return saved.cloneRange();
+    return null;
+  }
+
+  /**
    * 1. 跨段落检查：禁止跨越不同 [data-node-id] 块容器；
    * 2. 光标单点一键取消：光标停在遮罩内任意位置时，自动向上捕获整个连续集群，瞬间全块取消；
    * 3. 划选选区处理：已全部覆盖则一键清除，未全部覆盖则统一打上遮罩；
    * 4. 彻底依托思源官方 AST 与 Undo 事务，零 DOM 撕碎，零格式损坏。
    */
-  private handleStandardClozeAction(protyle: any, isRetry = false) {
+  private handleStandardClozeAction(
+    protyle: any,
+    isRetry = false,
+    preferredRange?: Range,
+    preferSaved = false,
+  ) {
     const selection = window.getSelection();
-    if (!selection || selection.rangeCount === 0) {
+    if (!selection) {
       showMessage(String(this.i18n.noSelection || '请先选中文本或将光标置于挖空块内'), 2000, 'info');
       return;
     }
 
-    let range = selection.getRangeAt(0);
+    let range = this.resolveActionRange(protyle, preferredRange, preferSaved);
+    if (!range) {
+      showMessage(String(this.i18n.noSelection || '请先选中文本或将光标置于挖空块内'), 2000, 'info');
+      return;
+    }
 
     // 表格单元格编辑态：td 已被 openTableCellRichEditor 整体换成独立 ProtyleLite，
     // 单元格内的块是**没有持久 ID 的临时块**。此时若继续走外层 protyle 的事务，
@@ -616,7 +756,7 @@ export default class ClozePlugin extends Plugin {
     const cellEditor = closestCellEditor(range.startContainer);
     if (cellEditor) {
       if (isRetry) {
-        showMessage('单元格仍处于编辑状态，请点击单元格外部后再按 ⌥Q', 2500, 'info');
+        showMessage(String(this.i18n.cellStillEditing || '单元格仍处于编辑状态，请点击单元格外部后再试'), 2500, 'info');
         return;
       }
       this.retreatFromCellEditor(protyle, selection, range, cellEditor);
@@ -630,7 +770,7 @@ export default class ClozePlugin extends Plugin {
     let endBlock: Element | null = endNode?.closest('[data-node-id]') || null;
 
     if (!startBlock || !endBlock) {
-      showMessage('请将光标置于正文段落内', 2000, 'info');
+      showMessage(String(this.i18n.notInParagraph || '请将光标置于正文段落内'), 2000, 'info');
       return;
     }
 
@@ -644,7 +784,7 @@ export default class ClozePlugin extends Plugin {
       } else if (endBlock.contains(startBlock)) {
         range.setEnd(startBlock, startBlock.childNodes.length);
       } else {
-        showMessage('行内挖空不能跨段落，请在同一段落内选择', 2000, 'info');
+        showMessage(String(this.i18n.crossBlock || '行内挖空不能跨段落，请在同一段落内选择'), 2000, 'info');
         return;
       }
 
@@ -654,16 +794,16 @@ export default class ClozePlugin extends Plugin {
       endBlock = endNode?.closest('[data-node-id]') || null;
 
       if (!startBlock || !endBlock || startBlock !== endBlock) {
-        showMessage('行内挖空不能跨段落，请在同一段落内选择', 2000, 'info');
+        showMessage(String(this.i18n.crossBlock || '行内挖空不能跨段落，请在同一段落内选择'), 2000, 'info');
         return;
       }
     }
 
-    let targetKbd: HTMLElement | null = null;
+    let targetClusters: HTMLElement[][] = [];
 
     // 检查光标折叠情况（单点光标落入）
-    if (selection.isCollapsed) {
-      targetKbd = startNode?.closest<HTMLElement>(KBD_SELECTOR) || null;
+    if (range.collapsed) {
+      let targetKbd = startNode?.closest<HTMLElement>(KBD_SELECTOR) || null;
 
       if (!targetKbd) {
         // 光标可能落在被挖空夹住的行内公式内部
@@ -688,26 +828,24 @@ export default class ClozePlugin extends Plugin {
         showMessage(String(this.i18n.noSelection || '请先选中文本或将光标置于挖空块内'), 2000, 'info');
         return;
       }
+      targetClusters = [getClozeCluster(targetKbd)];
     } else {
-      // 划选：只要选区与挖空块相交，就按「取消整个遮罩」处理。
-      // 用户语义——选中遮罩的一部分（哪怕只选到一小段、甚至起点落在遮罩外面）
-      // 再按 ⌥Q，取消的是整个遮罩，而不是只取消被选中的那一片。
-      targetKbd = findKbdInRange(range, startBlock);
+      // 划选：收集全部相交簇。用户选中多个遮罩再按快捷键时，取消的应当是
+      // 整段选区里的所有遮罩，而不是只取消 DOM 顺序上的第一个。
+      targetClusters = findClustersInRange(range, startBlock);
     }
 
-    // 取消场景：把选区扩展到整个连续集群，免除逐片取消的痛苦
-    let cluster: HTMLElement[] = [];
-    if (targetKbd) {
-      cluster = getClozeCluster(targetKbd);
-      if (cluster.length > 0) {
-        const expandRange = document.createRange();
-        expandRange.setStartBefore(cluster[0]);
-        expandRange.setEndAfter(cluster[cluster.length - 1]);
+    // 取消场景：把选区扩展到首尾簇，免除逐片取消的痛苦。
+    // 多个簇之间的普通内容不会被打上 kbd，setInlineMark 只清选区内的 kbd。
+    const cluster = targetClusters.flat();
+    if (cluster.length > 0) {
+      const expandRange = document.createRange();
+      expandRange.setStartBefore(cluster[0]);
+      expandRange.setEndAfter(cluster[cluster.length - 1]);
 
-        selection.removeAllRanges();
-        selection.addRange(expandRange);
-        range = expandRange;
-      }
+      selection.removeAllRanges();
+      selection.addRange(expandRange);
+      range = expandRange;
     }
 
     if (protyle && protyle.toolbar && typeof protyle.toolbar.setInlineMark === 'function') {
@@ -726,7 +864,7 @@ export default class ClozePlugin extends Plugin {
           } catch {}
         }
 
-        const isFullyMarked = currentTypes.includes('kbd') || Boolean(targetKbd);
+        const isFullyMarked = currentTypes.includes('kbd') || targetClusters.length > 0;
         const kbdBefore = startBlock.querySelectorAll(KBD_SELECTOR).length;
 
         // 取消之前先把记录坐标取好：setInlineMark 之后块 DOM 可能被整体重建，
@@ -734,7 +872,7 @@ export default class ClozePlugin extends Plugin {
         const unveilRoot = resolveProtyleRoot(startBlock);
         const blockNodeId = startBlock.getAttribute('data-node-id');
 
-        // 调用思源官方原生管道执行标准化处理（等价于原生 ⌥D）。
+        // 调用思源官方原生管道执行标准化处理（等价于思源原生行内标记）。
         // 不注入任何自定义属性：Markdown 序列化只保留 kbd 的文本内容，
         // 附加属性在保存/重载后必然丢失，故集群完全由渲染层可见内容连续性重建。
         protyle.toolbar.setInlineMark(protyle, 'kbd', 'range');
@@ -769,11 +907,11 @@ export default class ClozePlugin extends Plugin {
           if (createdOk) {
             msg = String(this.i18n.clozeCreated || '已创建行内挖空块');
           } else {
-            msg = '创建未生效，请重试或把光标置于段落内再按 ⌥Q';
+            msg = String(this.i18n.createFailed || '创建未生效，请重试或把光标置于段落内');
             duration = 2500;
           }
         } else if (stillMarked) {
-          msg = '取消未生效，请把光标放进挖空块再按一次 ⌥Q';
+          msg = String(this.i18n.removeFailed || '取消未生效，请把光标放进挖空块再试一次');
           duration = 2500;
         } else {
           msg = String(this.i18n.clozeRemoved || '已取消整块行内挖空遮罩');
@@ -788,13 +926,13 @@ export default class ClozePlugin extends Plugin {
       }
     }
 
-    showMessage('未找到活动编辑器，请确保光标在笔记中', 2000, 'info');
+    showMessage(String(this.i18n.notInEditor || '未找到活动编辑器，请确保光标在笔记中'), 2000, 'info');
   }
 
   /* ========================================================================
      六、全局显隐
 
-     ⌥X / 顶栏眼睛是全局开关，按下它就是「所有遮罩统一」：先把逐块点开的揭晓
+     ⌥⇧X / 顶栏眼睛是全局开关，按下它就是「所有遮罩统一」：先把逐块点开的揭晓
      痕迹全部作废，再翻转开关。于是关闭时全部可见、重新开启时全部遮蔽，
      不会出现「一半显示一半遮蔽」。
      ======================================================================== */
@@ -818,10 +956,18 @@ export default class ClozePlugin extends Plugin {
 
   private updateTopBarState() {
     if (!this.topBarElement) return;
-    if (this.isClozeActive) {
-      this.topBarElement.classList.add('protyle-icon--active');
-    } else {
-      this.topBarElement.classList.remove('protyle-icon--active');
+
+    const title = String(this.i18n.toggleCloze || '切换完形填空显隐');
+    this.topBarElement.classList.toggle('protyle-icon--active', this.isClozeActive);
+    this.topBarElement.setAttribute('aria-pressed', String(this.isClozeActive));
+    this.topBarElement.setAttribute('aria-label', title);
+    this.topBarElement.setAttribute('title', title);
+
+    // 顶栏图标与移动端插件菜单项都靠 <use> 取图标；换图标比只加一个没有
+    // 样式的 class 更能让用户看出当前是开还是关。
+    const use = this.topBarElement.querySelector('use');
+    if (use) {
+      use.setAttribute('xlink:href', this.isClozeActive ? '#iconEyeoff' : '#iconEye');
     }
   }
 
@@ -848,9 +994,13 @@ export default class ClozePlugin extends Plugin {
       wysiwyg.classList.remove('sy-cloze-active');
     });
 
-    // 插件卸载后揭晓类失去 CSS 依托，留在 DOM 上只是垃圾，一并清掉。
-    document.querySelectorAll<HTMLElement>(`.${UNVEIL_CLASS}`).forEach((el) => {
-      el.classList.remove(UNVEIL_CLASS);
+    // 插件卸载后这些类失去 CSS 依托，留在 DOM 上只是垃圾，一并清掉。
+    document.querySelectorAll<HTMLElement>(`.${UNVEIL_CLASS}, .${HIDING_CLASS}`).forEach((el) => {
+      el.classList.remove(UNVEIL_CLASS, HIDING_CLASS);
+    });
+    document.querySelectorAll<HTMLElement>(`.${CLUSTER_MATH_CLASS}`).forEach((el) => {
+      el.classList.remove(CLUSTER_MATH_CLASS);
+      el.style.removeProperty(LINE_DROP_VAR);
     });
 
     this.clearReveal();
@@ -863,8 +1013,18 @@ export default class ClozePlugin extends Plugin {
   private initSettingsPanel() {
     this.setting = new Setting({
       confirmCallback: async () => {
+        const next = this.settings.defaultHide;
+        const changed = next !== this.isClozeActive;
         await this.savePluginSettings();
-        this.updateGlobalStyles();
+
+        // 「默认隐藏」同时作为当前开关的即时动作：用户改完设置就能看到效果，
+        // 不必重载插件。只有真的翻转了状态才清揭晓记录，避免普通保存把阅读进度抹掉。
+        if (changed) {
+          resetAllUnveil(this.unveilStore, document);
+          this.isClozeActive = next;
+          this.updateTopBarState();
+          this.updateGlobalStyles();
+        }
       },
     });
 

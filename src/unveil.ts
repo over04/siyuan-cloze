@@ -121,7 +121,7 @@ const animateTimers = new WeakMap<HTMLElement, ReturnType<typeof setTimeout>>();
 /**
  * 给这些元素配一次过渡。
  *
- * 过渡只在用户主动切换（点击、⌥X）时才有。回放补类是思源重建 DOM 的副产物，
+ * 过渡只在用户主动切换（点击、⌥⇧X）时才有。回放补类是思源重建 DOM 的副产物，
  * 给它配过渡就等于把「补类」变成一次从模糊到清晰的渐变，输入时看着就是闪一下。
  */
 export const animateCluster = (cluster: HTMLElement[]): void => {
@@ -267,10 +267,10 @@ const recordKeyAt = (nodeId: string, order: string[], i: number): string => {
  * 是按位置硬配的，可靠性不足，一旦据此迁移或记账，一次短暂的错配就变成永久错位。
  *
  * 位置级认的是「同一个位置上还是同一个遮罩」，它认不出「删掉一个遮罩、又在同一个位置
- * 挖空一段相似文本」——两者在 DOM 上完全同形。这条路径由调用方兜底：⌥Q 取消或新建
+ * 挖空一段相似文本」——两者在 DOM 上完全同形。这条路径由调用方兜底：⇧⌘C 取消或新建
  * 遮罩之后会调 forgetBlockOrder 丢掉基线（见 index.ts）。
  *
- * 顺带核对，清掉「块还在、记录里的簇已不存在」的失效记录（原生 ⌥D 取消遮罩、
+ * 顺带核对，清掉「块还在、记录里的簇已不存在」的失效记录（原生行内标记取消遮罩、
  * 撤销创建、直接改文本都会留下它），否则同答案文本的遮罩重建时会一出现就是揭晓态。
  * 核对必须两轮确认：思源重建块是「先清空、后填充」的跨帧过程，中间态里块骨架
  * 已存在而 kbd 尚未渲染，此时若直接判定为失效，揭晓态就永久丢了。
@@ -324,7 +324,7 @@ export const replayBlockUnveil = (store: UnveilStore, block: Element): void => {
   // 前者是文档加载与块重建的常规中间态——static 与 dynamic 在同一加载流程里连续
   // 两轮回放，正好耗尽两轮配额——而靠增加轮数永远分不开这两种观测。
   // 因此一律不清理：跳过这个块的核对，也不把它记进待确认集合。
-  // 代价是「整块遮罩被原生 ⌥D 取消」会留下失效记录，但这有 ⌥Q 取消路径与关文档兜底，
+  // 代价是「整块遮罩被原生行内标记取消」会留下失效记录，但这有 ⇧⌘C 取消路径与关文档兜底，
   // 且后果只是重建同文本遮罩时多亮一次，远轻于揭晓态被静默抹掉。
   if (items.length === 0) return;
 
@@ -529,7 +529,7 @@ export const rememberBlockOrder = (store: UnveilStore, block: Element): void => 
 /**
  * 作废某个块的全部揭晓记录，并把该块的视觉就地校正。
  *
- * ⌥Q 取消遮罩后，该块的记录失去意义；不清理的话，同块内重新创建的遮罩若答案文本
+ * ⇧⌘C 取消遮罩后，该块的记录失去意义；不清理的话，同块内重新创建的遮罩若答案文本
  * 恰好与旧记录相同，会一出现就是揭晓态。
  *
  * 只删记录是不够的——同块内其它簇的标记还留在 DOM 上，会出现「记录里没有、
@@ -605,12 +605,12 @@ export const dropUnveilForBlockId = (
 /**
  * 清掉所有文档里逐块点开的揭晓状态。
  *
- * 顶栏眼睛与 ⌥X 是全局开关，按下它就该是「所有遮罩统一」：先把逐块点开的痕迹
+ * 顶栏眼睛与 ⌥⇧X 是全局开关，按下它就该是「所有遮罩统一」：先把逐块点开的痕迹
  * 全部清掉，再翻转开关。不这么做的话，重新开启遮蔽后，之前手动点开的那几块
  * 仍然显示着，屏幕上一半显示一半遮蔽。
  */
 export const resetAllUnveil = (store: UnveilStore, scope: ParentNode): void => {
-  // ⌥X 会同时翻转全局遮蔽开关，整篇 kbd 的样式都要变，因此整篇都配一次过渡。
+  // ⌥⇧X 会同时翻转全局遮蔽开关，整篇 kbd 的样式都要变，因此整篇都配一次过渡。
   // 必须赶在 store.drop 摘掉揭晓类之前收集，否则那些元素就找不回来了。
   const kbds = Array.from(scope.querySelectorAll<HTMLElement>(KBD_SELECTOR));
   if (kbds.length > 0) animateCluster(kbds);

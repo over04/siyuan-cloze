@@ -1,11 +1,21 @@
 {
-  "createCloze": "Create/Remove Inline Cloze (⌥Q Quick-Toggle)",
+  "createClozeTip": "Create/Remove Inline Cloze",
   "toggleCloze": "Toggle Cloze Visibility",
   "clozeActive": "Cloze mode activated",
   "clozeInactive": "Cloze mode deactivated",
   "clozeCreated": "Inline cloze block created",
   "clozeRemoved": "Complete inline cloze mask removed",
-  "noSelection": "Please select text or place cursor inside cloze",
+  "noSelection": "Select text or place the cursor inside a cloze block",
   "defaultHide": "Hide Cloze by Default",
-  "defaultHideDesc": "Hide all inline cloze blocks by default when opening documents"
+  "defaultHideDesc": "Hide all inline cloze blocks when opening documents; changes apply immediately",
+  "cellSelectionNotFound": "Could not locate the selection in the cell. Select again.",
+  "cellInvalid": "The cell is no longer valid. Select again.",
+  "cellRich": "This cell has complex content. Exit cell editing and try again.",
+  "cellRestoreFailed": "Could not restore the selection. Select again.",
+  "cellStillEditing": "The cell is still being edited. Click outside the cell and try again.",
+  "notInParagraph": "Place the cursor inside a body paragraph",
+  "crossBlock": "Inline cloze cannot span paragraphs. Select within one paragraph.",
+  "notInEditor": "No active editor found. Make sure the cursor is in a note.",
+  "createFailed": "Cloze was not created. Try again or place the cursor inside a paragraph.",
+  "removeFailed": "Cloze was not removed. Place the cursor inside the cloze block and try again."
 }
