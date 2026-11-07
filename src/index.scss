@@ -41,6 +41,7 @@ $kbd: 'span[data-type~="kbd"]';
      由它们自己的规则给。 */
   #{$kbd}[data-type~="text"]:where(:not([data-type~="mark"]):not([data-type~="code"]):not([data-type~="inline-memo"]):not([data-type~="search-mark"])) {
     background-color: transparent;
+    background-image: none;
   }
 
   #{$kbd} {
@@ -54,6 +55,12 @@ $kbd: 'span[data-type~="kbd"]';
   /* 底色：mark / code / inline-memo / search-mark 自带底色，检索命中与自定义样式也要留 */
   #{$kbd}:where(:not([data-type~="mark"]):not([data-type~="code"]):not([data-type~="inline-memo"]):not([data-type~="search-mark"]):not([data-type~="text"])) {
     background-color: transparent !important;
+  }
+
+  /* 主题常给 kbd 铺一层渐变当键帽，只清颜色会把渐变留在原地，看上去就是一块灰底。
+     块引用、文件引用标注用 background-image 画那条虚线，要排除在外。 */
+  #{$kbd}:where(:not([data-type~="mark"]):not([data-type~="code"]):not([data-type~="inline-memo"]):not([data-type~="search-mark"]):not([data-type~="text"]):not([data-type~="block-ref"]):not([data-type~="file-annotation-ref"])) {
+    background-image: none !important;
   }
 
   /* 边框：上、左、右三边只有 kbd 自己用；下边框留给用它画线的标记 */

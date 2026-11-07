@@ -154,6 +154,7 @@ test('裸 kbd 被中和成普通文字，只留提示线', () => {
 
   assert.equal(expectDeclared(el, 'font'), 'inherit');
   assert.equal(expectDeclared(el, 'background-color'), 'transparent');
+  assert.equal(expectDeclared(el, 'background-image'), 'none');
   assert.equal(expectDeclared(el, 'border-bottom-style'), 'none');
   assert.equal(expectDeclared(el, 'border-top-style'), 'none');
   assert.equal(expectDeclared(el, 'box-shadow'), 'none');
@@ -189,6 +190,9 @@ test('高光、备注、检索命中自带底色，插件不得改写', () => {
     const el = mount(type);
     expectUntouched(el, 'background-color', '这类标记的底色就是它的语义');
   });
+
+  const current = mount('search-mark kbd', { className: 'search-mark--hl' });
+  expectUntouched(current, 'background-color', '当前命中的底色同样属于检索');
 });
 
 test('mark--hl 的外描边要留着', () => {
