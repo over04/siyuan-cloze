@@ -27,6 +27,7 @@ npm test
 | `anchor.test.mjs` | 锚点解析、邻居扫描、节点解析、选区求交，以及 JS↔CSS 契约 |
 | `tableCell.test.mjs` | 单元格形态判定与可见文本偏移换算（`src/tableCell.ts` 纯函数层） |
 | `unveil.test.mjs` | 标识稳定性、记录与回放、关文档恢复默认、SCSS 契约（`src/unveil.ts` 纯函数层） |
+| `inlineStyles.test.mjs` | 编译 `src/index.scss`，按 `data-type` 组合逐条求命中，锁住插件不得吞掉的原生行内样式 |
 | `helpers.mjs` | 共用件：jsdom 装配与块包装（不以 `.test.mjs` 结尾，不会被当用例执行） |
 
 `cluster.test.mjs` 用 jsdom 建真实 DOM，直接调用 `src/cluster.ts` 里的集群算法。
@@ -35,9 +36,9 @@ npm test
 「两次划选被并成一个遮罩」这个缺陷，而不是永远绿。
 
 尚未覆盖：`src/index.ts` 里的 ⇧⌘C 创建/取消管道、单元格退避流程（`retreatFromCellEditor`）
-与显晓类施加——它们依赖 `protyle.toolbar` 与真实单元格编辑器，必须在真实编辑器里才跑得起来；
-`index.scss` 的遮蔽视觉也没有断言。
-`anchor.test.mjs` 末尾的契约用例只锁住类名与选择器这两个跨文件常量。
+与显晓类施加——它们依赖 `protyle.toolbar` 与真实单元格编辑器，必须在真实编辑器里才跑得起来。
+`anchor.test.mjs` 末尾的契约用例只锁住类名与选择器这两个跨文件常量；样式表的行为由
+`inlineStyles.test.mjs` 负责。
 
 `unveil.test.mjs` 覆盖纯函数层：键稳定性与重复答案消歧、点击切换（整簇加类/去类）、
 DOM 重建后回放保活、失效记录两轮核对、`store.drop` 后恢复默认遮蔽、取消遮罩时作废并校正视觉。
@@ -84,8 +85,9 @@ MutationRecord 后半段时不会自愈。
 把 `mousedown` 改回 `click` → 「切换挂在 mousedown 上」失败；
 把遮蔽段的 `position: relative` 或外扩伪元素去掉 → 「遮蔽态的命中区要跟着模糊范围一起外扩」失败；
 把 `mouseup` / `click` 的吞事件监听去掉 → 「切换挂在 mousedown 上，命中时把整次交互吞掉」失败；
-把提示线改回 `text-decoration`，或把 kbd 与公式拆成两套画线机制 → 「提示线由 ::before 统一画」失败；
-把遮蔽态的隐藏从 `::before` 挪回元素本身 → 同一条用例失败；
+把提示线改回 `::before`、或让它叠到 u / a / tag / s / 公式上 → 「提示线用 text-decoration 画」失败；
+把遮蔽态的隐藏从 `text-decoration-color` 挪回元素本身 → 同一条用例失败；
+给 `.sy-cloze-math` 加回 `display: inline-block` → 同一条用例失败；
 去掉 `markClusterMath` 的打标、或去掉它的摘类分支 → 「簇内相邻的多个公式都打标」/「遮罩取消后公式的类要摘掉」失败；
 在 `commitToggle` 里加回 `root.querySelector(\`[data-node-id=…]\`)` → 「提交切换时不得按块 ID 直接取第一个元素」失败；
 去掉一级的 `target.root.contains(target.anchor)` 校验 → 同一条用例失败；
@@ -99,10 +101,17 @@ MutationRecord 后半段时不会自愈。
 `preventDefault` 已经让双击选词不可能发生，回滚只会让手快的人点两下等于没点。
 
 遮蔽态的 kbd 另加一层透明伪元素，左右各外扩 6px、纵向撑满行高：`blur(6px)` 让模糊块看起来比
-实际宽出一圈，而 kbd 的 padding 只有 1px，命中区不跟着扩就会「照着模糊边缘点、实际落到相邻
+实际宽出一圈，而 kbd 的内边距已经归零，命中区不跟着扩就会「照着模糊边缘点、实际落到相邻
 文本上」。伪元素绝对定位、不参与排版，点击落在它身上时事件目标仍是宿主 kbd，判定照旧。
+外扩走 `::before`：思源把 `::after` 用在行内公式的方向标记上。
 
-常态提示线由 `::before` 统一画在元素盒底，`kbd` 与公式共用同一套机制；`markClusterMath` 量出每个成员到簇内容最低点的差值写进 `--sy-cloze-line-drop`，把较矮的成员下移，整簇落在同一条水平线上。不要改回 `text-decoration` 或 `border-bottom`：前者会沿基线横穿较高的公式，后者落在行盒底、跨行还会分段。公式必须是 `inline-block`，否则线仍会落在行盒底。遮蔽态的隐藏也要打在 `::before` 上——线在伪元素上，打在元素本身不起作用。
+常态提示线由 `text-decoration` 画：不参与排版，跨行时每行各自一条。kbd 自己带线或自带底色的
+标记（u、a、tag、备注、引用、删除线、公式、行内代码）一律让开，否则会叠成两道。遮蔽态用
+`text-decoration-color: transparent` 藏线，删除线标记排除在外——它用的也是 text-decoration。
+
+行内公式不参与打线，也不得改 `display`：一旦改成 `inline-block`，公式的基线与行高都会跟着变。
+公式在遮蔽态依靠 `.sy-cloze-math` 类一起模糊，这个类由 `markClusterMath` 按簇计算打上，因为
+Markdown 往返会把簇内公式上的 kbd 去掉。
 
 公式是 kbd 的**兄弟**而不是后代：思源把一次挖空拆成多个 kbd 切片，行内公式是原子节点、kbd 无法跨越它，所以簇是「kbd 公式 kbd」这样的平级结构（见 cluster.ts 的兄弟遍历）。**不要用 CSS 选择器去找簇成员公式**：相邻兄弟 `+` 只能覆盖「kbd 紧跟一个公式」，覆盖不到「kbd 公式 公式 kbd」里排在后面的那些——而簇里连续多个公式是常态（一个矩阵公式后面紧跟一个 `~` 符号的公式），它还会误伤紧挨遮罩但不属于这个遮罩的公式；后代选择器则一个元素都命不中。簇成员由 `markClusterMath` 按同一套簇计算打上 `.sy-cloze-math`。
 

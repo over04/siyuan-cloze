@@ -2,8 +2,8 @@
   "name": "siyuan-cloze",
   "author": "YG",
   "url": "https://github.com/YG/siyuan-cloze",
-  "version": "1.1.0",
-  "minversion": "3.0.0",
+  "version": "1.1.1",
+  "minversion": "3.8.3",
   "frontEnd": true,
   "backEnd": false,
   "displayName": {

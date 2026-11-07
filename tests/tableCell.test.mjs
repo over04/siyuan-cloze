@@ -26,6 +26,7 @@ import {
   isZeroWidth,
   matchHotkey,
   parseHotkeyBindings,
+  resolveHotkeyBindings,
   visibleText,
 } from '../src/tableCell.ts';
 
@@ -187,6 +188,14 @@ test('默认快捷键：⇧⌘C 创建、⌥⇧X 显隐', () => {
   assert.equal(matchHotkey('⌥⇧X', keyEvent({ key: 'X', code: 'KeyX', altKey: true }), false), false);
 });
 
+test('resolveHotkeyBindings 区分未配置与显式清空', () => {
+  assert.deepEqual(resolveHotkeyBindings(undefined, '⇧⌘C'), ['⇧⌘C']);
+  assert.deepEqual(resolveHotkeyBindings(null, '⇧⌘C'), ['⇧⌘C']);
+  assert.deepEqual(resolveHotkeyBindings({ custom: '' }, '⇧⌘C'), []);
+  assert.deepEqual(resolveHotkeyBindings({ bindings: { version: 1, keys: [] } }, '⇧⌘C'), []);
+  assert.deepEqual(resolveHotkeyBindings({ custom: '⌥K' }, '⇧⌘C'), ['⌥K']);
+});
+
 test('工具栏项默认键位与唯一创建入口写死在插件源码里', () => {
   const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
   const source = fs.readFileSync(path.join(repoRoot, 'src/index.ts'), 'utf8');
@@ -196,6 +205,9 @@ test('工具栏项默认键位与唯一创建入口写死在插件源码里', ()
   assert.match(source, /name: 'cloze'/, '必须注册工具栏入口');
   assert.doesNotMatch(source, /langKey: 'createCloze'/, '创建动作不得再注册成第二条命令');
   assert.doesNotMatch(source, /ensureTopBarCreate/, '不得再注册顶栏或菜单兜底入口');
+  assert.match(source, /protyle = protyle\?\.protyle \?\? protyle;/, '桌面 Protyle 实例必须归一成 IProtyle');
+  assert.match(source, /data-plugin-toolbar="true"\]\[data-type="cloze"\]/, '移动端必须接管插件工具栏按钮');
+  assert.match(source, /#keyboardToolbar/, '移动端按钮必须限定在键盘工具栏');
 });
 
 test('matchHotkey 处理 ⌘ 与 ⌃ 的平台差异', () => {

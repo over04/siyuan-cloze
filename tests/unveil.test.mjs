@@ -1038,18 +1038,17 @@ test('JS 与 CSS 的契约：揭晓类必须落在遮蔽规则的选择器里', 
 
 test('JS 与 CSS 的契约：手型光标只挂在遮蔽开启时，且不落在遮蔽段内', () => {
   const stripped = scss.replace(/\/\*[\s\S]*?\*\//g, '');
-  const cursorRule = stripped
-    .split('}')
-    .find((rule) => rule.includes(KBD_SELECTOR) && rule.includes('cursor: pointer'));
+  // 样式表是嵌套写法，按 } 切段拿不到外层选择器，直接截取遮蔽段。
+  const maskSection = stripped.slice(stripped.indexOf('body.sy-cloze-active'));
 
-  assert.ok(cursorRule, '遮蔽开启时必须有手型光标提示可点击');
-  assert.ok(
-    cursorRule.includes('body.sy-cloze-active'),
-    '光标规则必须限定在遮蔽开启时，否则编辑态会出现「手型但点了没反应」',
-  );
+  assert.ok(maskSection.length > 0, '遮蔽段必须存在');
+
+  const cursorRule = maskSection.split('}').find((rule) => rule.includes('cursor: pointer'));
+  assert.ok(cursorRule, '光标规则必须写在遮蔽段内，否则编辑态会出现「手型但点了没反应」');
+  assert.ok(cursorRule.includes(KBD_SELECTOR), '光标只挂在 kbd 上');
   assert.ok(
     !cursorRule.includes(`:not(.${REVEAL_CLASS})`),
-    '光标规则不得落在遮蔽段里，否则揭晓态会丢掉手型提示',
+    '光标规则不得落在遮蔽段的 :not() 分支里，否则揭晓态会丢掉手型提示',
   );
 });
 
@@ -1067,7 +1066,8 @@ test('JS 与 CSS 的契约：遮蔽态的命中区要跟着模糊范围一起外
   assert.ok(maskRule, '找不到遮蔽段规则');
   assert.ok(maskRule.includes('position: relative'), '遮蔽段要给外扩的伪元素留定位参照');
 
-  const hitRule = rules.find((rule) => rule.includes('::after') && rule.includes('pointer-events'));
+  // 外扩走 ::before：思源把 ::after 用在行内公式的方向标记上，占用了会改掉公式的排版。
+  const hitRule = rules.find((rule) => rule.includes('::before') && rule.includes('pointer-events'));
   assert.ok(hitRule, '遮蔽态缺少外扩命中区');
   assert.ok(/left:\s*-\d/.test(hitRule) && /right:\s*-\d/.test(hitRule), '命中区要左右外扩');
   assert.ok(hitRule.includes(KBD_SELECTOR), '命中区必须挂在 kbd 上，否则事件目标不再是遮罩');
@@ -1108,63 +1108,72 @@ test('JS 与 CSS 的契约：创建或取消遮罩不得顺手切换填空模式
   );
 });
 
-test('JS 与 CSS 的契约：提示线由 ::before 统一画，kbd 与公式共用一套机制', () => {
+test('JS 与 CSS 的契约：提示线用 text-decoration 画，且让开自己带线的标记', () => {
   const stripped = scss.replace(/\/\*[\s\S]*?\*\//g, '');
   const rules = stripped.split('}');
 
-  // 两套机制（text-decoration 沿基线走 / border 落在盒底）高度天然不同，公式盒高又随内容变，
-  // 视觉上会断成几条。统一由 ::before 画在元素盒底，再用 JS 量出的下移量对齐到簇内容最低点。
-  const lineRule = rules.find(
-    (rule) => rule.includes('::before') && rule.includes('--sy-cloze-line-drop'),
-  );
-  assert.ok(lineRule, '提示线必须由 ::before 画，并用 JS 量出的下移量对齐');
+  // text-decoration 不参与排版、跨行时每行各自一条。绝对定位伪元素在多行元素上会横穿整段，
+  // 公式那边还得靠 display:inline-block 才量得出盒底，那会把公式的排版改掉。
+  const lineRule = rules.find((rule) => rule.includes('text-decoration: underline dashed'));
+  assert.ok(lineRule, '常态提示线必须由 text-decoration 画');
   assert.ok(
-    lineRule.includes(KBD_SELECTOR) && lineRule.includes('.sy-cloze-math'),
-    'kbd 与公式必须共用同一条画线规则，两套机制的高度对不齐',
-  );
-  assert.ok(
-    /border-bottom:\s*2px\s+dashed\s+var\(--b3-theme-primary/.test(lineRule),
-    '提示线要用主题色、2px 虚线',
+    /var\(--b3-theme-primary/.test(lineRule),
+    '提示线要走主题主色，深色主题下才不会消失',
   );
 
-  assert.ok(
-    !/text-decoration(-line)?:\s*underline/.test(stripped),
-    'text-decoration 沿基线走，与公式盒底的高度对不齐，已被 ::before 取代',
-  );
+  // 自带下划线的标记靠 border-bottom 画线、删除线靠 text-decoration，叠上提示线就变成两道。
+  ['u', 'a', 'tag', 'inline-memo', 'block-ref', 'file-annotation-ref', 'virtual-block-ref', 's', 'inline-math', 'code']
+    .forEach((type) => {
+      assert.ok(
+        lineRule.includes(`:not([data-type~="${type}"])`),
+        `提示线必须让开 ${type}：那类标记自己就带线或自带底色`,
+      );
+    });
 
-  // 线在伪元素上，遮蔽态的隐藏也必须打在伪元素上——打在元素本身不起作用。
-  const hideRule = rules.find(
-    (rule) => rule.includes('body.sy-cloze-active') && rule.includes('::before'),
+  // 遮蔽态的隐藏要打在 text-decoration-color 上——线在 text-decoration 上，改元素颜色藏不住它。
+  const maskSection = stripped.slice(stripped.indexOf('body.sy-cloze-active'));
+  const hideRule = maskSection.split('}').find(
+    (rule) => rule.includes('text-decoration-color: transparent'),
   );
-  assert.ok(hideRule, '遮蔽态必须在 ::before 上把线置透明，打在元素本身不起作用');
-  assert.ok(
-    hideRule.includes(KBD_SELECTOR) && hideRule.includes('.sy-cloze-math'),
-    'kbd 与公式的线都要被遮蔽态藏掉',
-  );
+  assert.ok(hideRule, '遮蔽态必须把提示线的颜色置透明，且只在遮蔽开启时生效');
   assert.ok(
     hideRule.includes(`:not(.${REVEAL_CLASS})`) && hideRule.includes(`:not(.${UNVEIL_CLASS})`),
     '揭晓态与划选透晓态必须排除在外，线在那两种状态下要保持可见',
+  );
+  assert.ok(
+    hideRule.includes(':not([data-type~="s"])'),
+    '删除线标记要排除：它用的也是 text-decoration，一起置透明会把删除线藏掉',
   );
 
   // 公式侧：类名由 JS 按簇计算打上，CSS 不再依赖相邻兄弟——相邻兄弟覆盖不到「kbd 公式 公式
   // kbd」里排在后面的公式，还会误伤紧挨遮罩但不属于它的公式。
   const mathRule = rules.find(
-    (rule) => rule.includes('.sy-cloze-math') && rule.includes('display: inline-block'),
+    (rule) => rule.includes('.sy-cloze-math') && rule.includes('blur(6px)'),
   );
-  assert.ok(mathRule, '公式要 inline-block，线才会落在公式盒底而不是行盒底');
+  assert.ok(mathRule, '簇内公式必须与 kbd 一起进入遮蔽规则');
+
+  assert.ok(
+    !/display:\s*inline-block/.test(stripped),
+    '行内公式的 display 不能被插件改掉：一旦改成 inline-block，公式的基线与行高都会跟着变',
+  );
 });
 
-test('JS 契约：簇成员公式的类与下移量由 markClusterMath 打上', () => {  const cluster = fs.readFileSync(path.join(repoRoot, 'src/cluster.ts'), 'utf8');
+test('JS 契约：簇成员公式由 markClusterMath 打类', () => {
+  const cluster = fs.readFileSync(path.join(repoRoot, 'src/cluster.ts'), 'utf8');
   const source = fs.readFileSync(path.join(repoRoot, 'src/index.ts'), 'utf8');
 
   assert.ok(/export const markClusterMath/.test(cluster), 'cluster.ts 必须导出 markClusterMath');
   assert.ok(
-    /getBoundingClientRect\(\)\.bottom/.test(cluster),
-    '下移量要按元素实际盒底量，不能靠 CSS 猜',
+    /classList\.add\(CLUSTER_MATH_CLASS\)/.test(cluster),
+    '簇内公式要打上 CLUSTER_MATH_CLASS，遮蔽规则靠它命中',
+  );
+  assert.ok(
+    !/getBoundingClientRect/.test(cluster),
+    '标记阶段不得量取几何：读数会强制重排，而这条路在每次 DOM 变更时都会走',
   );
   assert.ok(
     /markClusterMath\(block\)/.test(source) && /markClusterMathIn/.test(source),
-    'index.ts 必须在 DOM 变更与加载两个时机都打标，否则公式线会漏',
+    'index.ts 必须在 DOM 变更与加载两个时机都打标，否则簇内公式会漏遮蔽',
   );
 });
 

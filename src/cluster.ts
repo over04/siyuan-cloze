@@ -28,11 +28,8 @@ export const INVISIBLE_TEXT = /^[\s\u200b\u2060\ufeff]*$/u;
 export const KBD_SELECTOR = 'span[data-type~="kbd"]';
 export const MATH_SELECTOR = 'span[data-type~="inline-math"]';
 
-/** 簇成员里的行内公式加这个类，CSS 据此给它画提示线。 */
+/** 簇成员里的行内公式加这个类，遮蔽规则据此把它与 kbd 一起模糊。 */
 export const CLUSTER_MATH_CLASS = 'sy-cloze-math';
-
-/** 簇内每个成员的下移量（CSS 变量名），由 markClusterMath 量出来。 */
-export const LINE_DROP_VAR = '--sy-cloze-line-drop';
 
 /** 划选时加在整簇每个成员上的透晓类，由 index.scss 的 :not() 反向生效。 */
 export const REVEAL_CLASS = 'sy-cloze-reveal';
@@ -344,48 +341,27 @@ export const getClusterKey = (block: Element | null, cluster: HTMLElement[]): st
 };
 
 /**
- * 给块内属于某个簇的行内公式打标，并量出簇内每个成员的下移量。
+ * 给块内属于某个簇的行内公式打上簇成员类。
  *
- * 两件事都只能在这里做，CSS 表达不了：
- *
- * 一、**覆盖**。公式是 kbd 的兄弟而不是后代，CSS 的相邻兄弟只能覆盖「kbd 紧跟一个公式」，
- * 覆盖不到「kbd 公式 公式 kbd」里排在后面的那些——而簇里连续多个公式是常态（一个矩阵公式
- * 后面紧跟一个 `~` 符号的公式）。按同一套簇计算打标，顺带把「紧挨遮罩但不属于这个遮罩」
+ * 公式是 kbd 的兄弟而不是后代，CSS 的相邻兄弟只能覆盖「kbd 紧跟一个公式」，覆盖不到
+ * 「kbd 公式 公式 kbd」里排在后面的那些——而簇里连续多个公式是常态（一个矩阵公式后面
+ * 紧跟一个 `~` 符号的公式）。按同一套簇计算打标，顺带把「紧挨遮罩但不属于这个遮罩」
  * 的公式排除在外。
  *
- * 二、**对齐**。文字线沿基线走、公式线落在盒底，公式盒高随内容变，两者高度天然不同，
- * 视觉上断成几条。这里统一压到簇内容的最低点：最低的那个（通常是矩阵）下移 0，其余按
- * 差值下移，于是整簇的线落在同一条水平线上。
- *
- * 只有簇内含公式时才需要量高度——纯文字的簇里所有成员盒高一致，下移量本来就是 0，
- * 而 getBoundingClientRect 会强制重排，不该在每次 DOM 变更时无差别地量。
+ * 这个类供遮蔽规则使用：Markdown 往返会把簇内公式上的 kbd 去掉（`<kbd>a</kbd>$x$`
+ * 读回时公式只有 inline-math），不按簇统一打标，那个公式在背诵态就会原样露出答案。
  */
 export const markClusterMath = (block: Element): void => {
-  const kbds = block.querySelectorAll<HTMLElement>(KBD_SELECTOR);
   const seen = new Set<HTMLElement>();
 
-  kbds.forEach((kbd) => {
+  block.querySelectorAll<HTMLElement>(KBD_SELECTOR).forEach((kbd) => {
     if (seen.has(kbd)) return;
 
     const cluster = getClozeCluster(kbd);
     cluster.forEach((el) => seen.add(el));
 
-    const math = cluster.filter((el) => isMath(el));
     cluster.forEach((el) => {
       if (isMath(el)) el.classList.add(CLUSTER_MATH_CLASS);
-    });
-
-    if (math.length === 0) {
-      cluster.forEach((el) => el.style.removeProperty(LINE_DROP_VAR));
-      return;
-    }
-
-    const bottoms = cluster.map((el) => el.getBoundingClientRect().bottom);
-    const lineY = Math.max(...bottoms);
-    cluster.forEach((el, i) => {
-      // 保留两位小数而不是取整：逐成员取整会让「盒底 + 下移量」在小数几何下差出零点几像素，
-      // 整簇就不是严格同一条线了。
-      el.style.setProperty(LINE_DROP_VAR, `${Math.max(0, lineY - bottoms[i]).toFixed(2)}px`);
     });
   });
 
@@ -393,7 +369,6 @@ export const markClusterMath = (block: Element): void => {
   block.querySelectorAll<HTMLElement>(MATH_SELECTOR).forEach((el) => {
     if (seen.has(el)) return;
     el.classList.remove(CLUSTER_MATH_CLASS);
-    el.style.removeProperty(LINE_DROP_VAR);
   });
 };
 

@@ -1,136 +1,198 @@
 /* ==========================================================================
    思源笔记行内挖空块样式表 (SiYuan Inline Cloze)
-   无损保护 KaTeX 公式、加粗、下划线等原生富文本结构，零降级、零污染
-   遮蔽 = 透明模糊 + 100% 灰度脱敏
+
+   遮罩标记复用思源行内 kbd：自定义属性在 Markdown 往返中会被丢弃，只有 kbd 这个
+   标记本身能存活。思源会把多种行内标记合并进同一个 span 的 data-type
+   （strong kbd / mark kbd / code kbd / sup kbd / a kbd / block-ref kbd …），
+   所以中和 kbd 自制外观时必须逐个属性避开其它标记自己使用的属性，
+   并把被 kbd 的 font 简写重置掉的取值按思源原生写法写回。
+
+   排除条件一律包在 :where() 里：这类排除链动辄十来个 :not()，把它们算进特异性的话，
+   遮蔽段就再也压不住常态规则（text-decoration-color 会被提示线抢走）。包起来之后，
+   每条规则的特异性只由「作用域 + kbd」决定，先后顺序一眼可读。
+
+   作用域一律限定在 .protyle-wysiwyg：编辑器之外（其它插件界面、导出预览）不碰。
    ========================================================================== */
+
+$kbd: 'span[data-type~="kbd"]';
+
+.protyle-wysiwyg {
+
+  /* ========================================================================
+     一、中和 kbd 自带的键帽外观
+     ======================================================================== */
+
+  /* 思源的 kbd 规则用 font 简写写成，会把 strong 的字重、em 的斜体、code 的等宽、
+     sup/sub 的字号一并重置成初始值。只压 font-size / font-family 压不住，
+     必须用同一条简写整体中和，再按共存的类型逐项写回（见第三节）。 */
+  #{$kbd}:not([data-type~="text"]) {
+    font: inherit !important;
+  }
+
+  /* 自定义文字样式由思源写成行内 style，行内声明会被 !important 压掉。
+     这一条不带 !important、特异性高一级，只用来压掉 kbd 的 font 简写与自带颜色，
+     行内声明照旧生效。 */
+  #{$kbd}[data-type~="text"] {
+    font: inherit;
+    color: inherit;
+  }
+
+  /* 底色单独一条：同时带 mark / code / 备注 / 检索命中的文字样式，底色归那几种标记，
+     由它们自己的规则给。 */
+  #{$kbd}[data-type~="text"]:where(:not([data-type~="mark"]):not([data-type~="code"]):not([data-type~="inline-memo"]):not([data-type~="search-mark"])) {
+    background-color: transparent;
+  }
+
+  #{$kbd} {
+    font-variant-emoji: normal !important;
+    margin: 0 !important;
+    vertical-align: baseline !important;
+    position: relative !important; /* 遮蔽态外扩命中区的定位参照 */
+    outline: none !important;
+  }
+
+  /* 底色：mark / code / inline-memo / search-mark 自带底色，检索命中与自定义样式也要留 */
+  #{$kbd}:where(:not([data-type~="mark"]):not([data-type~="code"]):not([data-type~="inline-memo"]):not([data-type~="search-mark"]):not([data-type~="text"])) {
+    background-color: transparent !important;
+  }
+
+  /* 边框：上、左、右三边只有 kbd 自己用；下边框留给用它画线的标记 */
+  #{$kbd} {
+    border-top-style: none !important;
+    border-left-style: none !important;
+    border-right-style: none !important;
+  }
+
+  #{$kbd}:where(:not([data-type~="u"]):not([data-type~="a"]):not([data-type~="tag"]):not([data-type~="inline-memo"]):not([data-type~="virtual-block-ref"])) {
+    border-bottom-style: none !important;
+  }
+
+  /* 圆角与阴影：code 的圆角、mark--hl 的外描边要留着 */
+  #{$kbd}:where(:not([data-type~="code"])) {
+    border-radius: 0 !important;
+    padding-top: 0 !important;
+  }
+
+  #{$kbd}:where(:not(.mark--hl)) {
+    box-shadow: none !important;
+  }
+
+  /* 内边距：code / tag 的横向内边距、block-ref 的下内边距各归各的 */
+  #{$kbd}:where(:not([data-type~="code"]):not([data-type~="block-ref"]):not([data-type~="file-annotation-ref"])) {
+    padding-bottom: 0 !important;
+  }
+
+  #{$kbd}:where(:not([data-type~="code"]):not([data-type~="tag"])) {
+    padding-left: 0 !important;
+    padding-right: 0 !important;
+  }
+
+  /* 颜色：kbd 把正文颜色固定成 on-surface，正文里的强调色会被吞掉。
+     没有其它着色标记时回落到继承色；其余类型在第三节写回主题色。 */
+  #{$kbd}:where(:not([data-type~="strong"]):not([data-type~="em"]):not([data-type~="s"]):not([data-type~="u"]):not([data-type~="mark"]):not([data-type~="code"]):not([data-type~="a"]):not([data-type~="tag"]):not([data-type~="block-ref"]):not([data-type~="file-annotation-ref"]):not([data-type~="search-mark"]):not([data-type~="text"])) {
+    color: inherit !important;
+  }
+
+  /* ========================================================================
+     二、常态提示线
+
+     用 text-decoration 画：不参与排版，跨行时每行各自一条。绝对定位伪元素在多行
+     元素上会拉出一条贯穿整段的长线，公式那边还得靠 display:inline-block 才量得出
+     盒底，那会把公式排版改掉。自带下划线的标记、删除线、行内公式与行内代码不再叠线。
+     ======================================================================== */
+  #{$kbd}:where(:not([data-type~="u"]):not([data-type~="a"]):not([data-type~="tag"]):not([data-type~="inline-memo"]):not([data-type~="block-ref"]):not([data-type~="file-annotation-ref"]):not([data-type~="virtual-block-ref"]):not([data-type~="s"]):not([data-type~="inline-math"]):not([data-type~="code"])) {
+    text-decoration: underline dashed var(--b3-theme-primary, rgba(130, 130, 130, .85)) !important;
+    text-decoration-thickness: 2px !important;
+    text-underline-offset: 2px !important;
+  }
+
+  /* ========================================================================
+     三、共存类型外观写回
+
+     kbd 的规则在思源样式表里排在 strong / em / s / sup / sub 之后，同特异性下会把
+     它们覆盖；插件又把 kbd 的 font 简写整体中和了。两头都要写回，取值与思源原生一致，
+     颜色一律走主题变量。code 的样式在思源里来自 @extend .fn__code、落在样式表最前面，
+     同特异性下全部输给 kbd，所以整组写回。
+     ======================================================================== */
+  #{$kbd}[data-type~="strong"] {
+    font-weight: bold !important;
+    color: var(--b3-protyle-inline-strong-color) !important;
+  }
+
+  #{$kbd}[data-type~="em"] {
+    font-style: italic !important;
+    color: var(--b3-protyle-inline-em-color) !important;
+  }
+
+  #{$kbd}[data-type~="s"] {
+    color: var(--b3-protyle-inline-s-color) !important;
+  }
+
+  #{$kbd}[data-type~="sup"],
+  #{$kbd}[data-type~="sub"] {
+    font-size: 75% !important;
+    line-height: 0 !important;
+  }
+
+  #{$kbd}[data-type~="code"] {
+    font-family: var(--b3-font-family-code) !important;
+    font-size: 85% !important;
+    background-color: var(--b3-protyle-code-background) !important;
+    padding: .2em .4em !important;
+    border-radius: var(--b3-border-radius) !important;
+  }
+}
 
 /* ==========================================================================
-   一、基础外观（常态编辑模式：淡点状下划线提示，一眼辨认挖空位置）
+   四、遮蔽态
+
+   开关挂在 body 上，作用域收进编辑器正文：新建的编辑器（分栏、单元格、
+   ProtyleLite）同样生效，编辑器之外一处也不碰。
    ========================================================================== */
+body.sy-cloze-active .protyle-wysiwyg {
 
-.protyle-wysiwyg span[data-type~="kbd"],
-.b3-typography span[data-type~="kbd"] {
-  background: transparent !important;
-  border: none !important;
-  /* 提示线交给 ::before 画（规则见下），这里只留定位参照。::after 已被遮蔽态的命中区外扩占用。 */
-  position: relative !important;
-  box-shadow: none !important;
-  outline: none !important;
-  border-radius: 2px !important;
-  margin: 0 !important;
-  padding: 0 1px !important;
-  font-family: inherit !important;
-  font-size: inherit !important;
-  line-height: inherit !important;
-  display: inline !important;
-  vertical-align: baseline !important;
-  /* 这里刻意不写 transition：思源重建块 DOM 之后，新的 kbd 元素不带揭晓类，
-     回放给它补类时若带过渡，就成了「从模糊渐变到清晰」的一段动画，输入时看着
-     就是闪一下。过渡改由 .sy-cloze-animating 门控，只在用户主动切换时挂上
-     （见文件末尾与 unveil.ts 的 animateCluster）。 */
-}
+  /* 簇内成员一起遮蔽：kbd 切片，以及被 kbd 夹住、往返后不再带 kbd 的行内公式 */
+  span[data-type~="kbd"]:not(.sy-cloze-reveal):not(.sy-cloze-unveiled),
+  span.sy-cloze-math:not(.sy-cloze-reveal):not(.sy-cloze-unveiled) {
+    filter: blur(6px) grayscale(100%) !important;
+    opacity: .65 !important;
+    position: relative !important;
+  }
 
-/* text-decoration 会传播进所有非原子行内级的后代，而 KaTeX 渲染出来是一串普通 span，
-   不钉住的话提示线照样横穿公式。行内公式本来就是原子行内级，显式钉成 inline-block
-   不会改变它自身的排版。 */
-/* 提示线统一由 ::before 伪元素画，kbd 与公式共用同一套机制——两套机制（text-decoration 沿
-   基线走 / border 落在盒底）的高度天然不同，视觉上会断成几条。这里把线钉在元素盒底，再用
-   JS 量出的 --sy-cloze-line-drop 把较矮的成员下移到与簇内最低者齐平，整簇落在同一条水平线上。 */
-.protyle-wysiwyg span[data-type~="kbd"]::before,
-.b3-typography span[data-type~="kbd"]::before,
-.protyle-wysiwyg span.sy-cloze-math::before,
-.b3-typography span.sy-cloze-math::before {
-  content: '' !important;
-  position: absolute !important;
-  left: 0 !important;
-  right: 0 !important;
-  bottom: calc(0px - var(--sy-cloze-line-drop, 0px)) !important;
-  border-bottom: 2px dashed var(--b3-theme-primary, rgba(130, 130, 130, 0.85)) !important;
-}
+  /* 提示线在遮蔽态藏掉。线在 text-decoration 上，隐藏也必须写 text-decoration-color；
+     删除线标记排除在外，免得把 line-through 一起藏了。 */
+  span[data-type~="kbd"]:not([data-type~="s"]):not(.sy-cloze-reveal):not(.sy-cloze-unveiled) {
+    text-decoration-color: transparent !important;
+  }
 
-/* 公式是 kbd 的兄弟，不是后代：思源把一次挖空拆成多个 kbd 切片，行内公式是原子节点、
-   kbd 无法跨越它，所以簇是「kbd 公式 kbd」这样的平级结构（见 cluster.ts 的兄弟遍历）。
-   类名由 markClusterMath 按同一套簇计算精确打上——CSS 的相邻兄弟只能覆盖「kbd 紧跟一个
-   公式」，覆盖不到「kbd 公式 公式 kbd」里排在后面的那些，还会误伤紧挨遮罩但不属于它的公式。 */
-.protyle-wysiwyg span.sy-cloze-math,
-.b3-typography span.sy-cloze-math {
-  /* 只有 inline-block 才让提示线落在公式盒底——保持 inline 的话 border 会画在行盒底，
-     跨行时还会分段，等于回到「线横穿公式」的老问题。 */
-  display: inline-block !important;
-  position: relative !important;
-}
+  /* 遮蔽态的命中区外扩：blur 让模糊块看起来比实际宽一圈，内边距归零后更明显。
+     ::before 空着不用，::after 留给思源行内公式的方向标记。 */
+  span[data-type~="kbd"]:not(.sy-cloze-reveal):not(.sy-cloze-unveiled)::before {
+    content: '' !important;
+    position: absolute !important;
+    left: -6px !important;
+    right: -6px !important;
+    top: -.4em !important;
+    bottom: -.4em !important;
+    background: transparent !important;
+    pointer-events: auto !important;
+  }
 
-/* 手型光标只在遮蔽开启时出现，提示「这里可以点」。写在独立的、不含 :not() 的
-   规则里，因此遮蔽态与揭晓态都保留；关闭遮蔽进入纯编辑时则不会出现
-   「手型光标但点了没反应」的误导。 */
-body.sy-cloze-active span[data-type~="kbd"] {
-  cursor: pointer !important;
+  /* 手型光标只在遮蔽开启时出现 */
+  span[data-type~="kbd"] {
+    cursor: pointer !important;
+  }
 }
 
 /* ==========================================================================
-   二、背诵遮蔽状态（与 git 2915f87 的视觉一致）
+   五、过渡：只在用户主动切换时生效
 
-   核心遮蔽：100% 灰度脱敏 + 深度毛玻璃模糊。
-
-   透晓由 JS 统一驱动，两种态都以「整簇」为单位，簇内每个成员（kbd 切片
-   与夹在中间的行内公式）一起恢复高清真彩：
-
-     - .sy-cloze-reveal   ：划选临时透晓，选区离开即撤
-     - .sy-cloze-unveiled ：点击切换的持久揭晓，活到本次文档打开结束
-
-   两者都靠下面这两条规则里的 :not() 反向失效，因此不存在「悬停左边整簇亮、
-   悬停右边只亮半边」的方向性缺口。
+   点击揭晓与 ⌥⇧X 全局切换时 JS 给受影响的元素挂 .sy-cloze-animating，一小段后摘掉。
+   回放补类不带它，因此思源重建 DOM 不会产生任何可见动画。
    ========================================================================== */
-
-body.sy-cloze-active span[data-type~="kbd"]:not(.sy-cloze-reveal):not(.sy-cloze-unveiled) {
-  background: transparent !important;
-  border: none !important;
-  box-shadow: none !important;
-  outline: none !important;
-
-  /* 核心遮蔽：100% 灰度脱敏 + 深度毛玻璃模糊 */
-  filter: blur(6px) grayscale(100%) !important;
-  opacity: 0.65 !important;
-
-  /* 给下面那个外扩命中区的伪元素留一个定位参照。 */
-  position: relative !important;
-
-  /* 遮蔽态的提示线由下面那条 ::before 规则置透明，这里不重复。 */
-}
-
-/* 遮蔽态把线藏掉。线挂在 ::before 上，隐藏也必须打在 ::before 上；
-   揭晓态与划选透晓态被排除在外，线保持可见。 */
-body.sy-cloze-active span[data-type~="kbd"]:not(.sy-cloze-reveal):not(.sy-cloze-unveiled)::before,
-body.sy-cloze-active span.sy-cloze-math:not(.sy-cloze-reveal):not(.sy-cloze-unveiled)::before {
-  border-bottom-color: transparent !important;
-}
-
-/* 遮蔽态的命中区外扩。
-   blur(6px) 让模糊块看起来比实际宽出一圈，而 kbd 的 padding 只有 1px——用户照着模糊
-   的边缘点下去，实际落在相邻文本上，命中判定收不到，这次点击等于没发生。
-   伪元素绝对定位、不参与排版，点击落在它身上时事件目标仍是宿主 kbd，判定照旧。 */
-body.sy-cloze-active span[data-type~="kbd"]:not(.sy-cloze-reveal):not(.sy-cloze-unveiled)::after {
-  content: '' !important;
-  position: absolute !important;
-  left: -6px !important;
-  right: -6px !important;
-  top: -0.4em !important;
-  bottom: -0.4em !important;
-  background: transparent !important;
-  pointer-events: auto !important;
-}
-
-/* ==========================================================================
-   三、过渡：只在用户主动切换时生效
-
-   点击揭晓、⌥⇧X 全局切换时，JS 会给受影响的 kbd 挂上 .sy-cloze-animating，
-   一小段后自动摘掉（unveil.ts 的 animateCluster）。回放补类不带它，因此思源
-   重建 DOM 不会产生任何可见动画——那正是「每输入一次闪一下」的来源。
-   ========================================================================== */
-
-span[data-type~="kbd"].sy-cloze-animating,
-span[data-type~="kbd"].sy-cloze-animating * {
-  transition: filter 0.25s ease-in-out, opacity 0.25s ease-in-out !important;
+.protyle-wysiwyg span[data-type~="kbd"].sy-cloze-animating,
+.protyle-wysiwyg span[data-type~="kbd"].sy-cloze-animating * {
+  transition: filter .25s ease-in-out, opacity .25s ease-in-out !important;
 }
 
 /* 顶栏眼睛与移动端插件菜单项：开/关换图标之外，再给一个主色提示。 */

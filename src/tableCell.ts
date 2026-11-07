@@ -171,6 +171,15 @@ export const parseHotkeyBindings = (keymap: unknown): string[] => {
   return typeof item.custom === 'string' && item.custom ? [item.custom] : [];
 };
 
+/**
+ * 取实际生效的快捷键。
+ *
+ * 只有 keymap 项不存在时才回落默认键；显式清空绑定（custom: '' 或空 keys）
+ * 表示用户禁用了这个动作，不能把默认键重新塞回去。
+ */
+export const resolveHotkeyBindings = (keymap: unknown, fallback: string): string[] =>
+  keymap === undefined || keymap === null ? [fallback] : parseHotkeyBindings(keymap);
+
 /** 主键比对：先比 event.key，再退到 event.code（⌥ 组合在部分平台会改写 key）。 */
 const matchesMainKey = (main: string, event: HotkeyEvent): boolean => {
   const upper = main.toUpperCase();

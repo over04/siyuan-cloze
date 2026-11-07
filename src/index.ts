@@ -3,7 +3,6 @@ import {
   CLUSTER_MATH_CLASS,
   INVISIBLE_TEXT,
   KBD_SELECTOR,
-  LINE_DROP_VAR,
   REVEAL_CLASS,
   UNVEIL_CLASS,
   findClustersInRange,
@@ -36,7 +35,7 @@ import {
   isMacPlatform,
   isRichCell,
   matchHotkey,
-  parseHotkeyBindings,
+  resolveHotkeyBindings,
 } from './tableCell';
 
 /** 创建/取消挖空的工具栏图标。 */
@@ -291,8 +290,7 @@ export default class ClozePlugin extends Plugin {
   /** 取工具栏项实际绑定的快捷键（在思源设置里改过就用改过的），没有绑定则回落默认 ⇧⌘C。 */
   private matchesClozeHotkey(event: KeyboardEvent): boolean {
     const keymap = (window as any)?.siyuan?.config?.keymap?.plugin?.[this.name]?.['cloze'];
-    const bindings = parseHotkeyBindings(keymap);
-    const list = bindings.length > 0 ? bindings : ['⇧⌘C'];
+    const list = resolveHotkeyBindings(keymap, '⇧⌘C');
     return list.some((hotkey) => matchHotkey(hotkey, event, isMacPlatform()));
   }
 
@@ -447,7 +445,8 @@ export default class ClozePlugin extends Plugin {
   /** 把命中的簇解析成可跨重建定位的目标：只留根元素、块 ID 与标识。 */
   private resolveToggleTarget(node: Node | null): ToggleTarget | null {
     const anchor = resolveClozeAnchor(node);
-    if (!anchor) return null;
+    // 编辑器之外（其它插件界面、导出预览）的 kbd 不是遮罩，不参与切换。
+    if (!anchor || !anchor.closest('.protyle-wysiwyg')) return null;
 
     const block = anchor.closest('[data-node-id]');
     const root = resolveProtyleRoot(anchor);
@@ -544,6 +543,11 @@ export default class ClozePlugin extends Plugin {
           ? (record.target as HTMLElement)
           : record.target.parentElement;
 
+        // 编辑器之外的变化与本插件无关：其它插件的界面里也会出现带 data-node-id 的元素
+        // 与 kbd，打标和回放都不该落进去。新建编辑器由 loaded-protyle-static / dynamic 负责。
+        const editor = target?.closest('.protyle-wysiwyg');
+        if (!editor) return;
+
         const host = target?.closest('[data-node-id]');
         if (host) blocks.add(host);
 
@@ -551,13 +555,14 @@ export default class ClozePlugin extends Plugin {
         record.addedNodes.forEach((node) => {
           if (node.nodeType !== Node.ELEMENT_NODE) return;
           const el = node as Element;
+          if (!editor.contains(el)) return;
           if (el.matches('[data-node-id]')) blocks.add(el);
           el.querySelectorAll('[data-node-id]').forEach((child) => blocks.add(child));
         });
       });
 
       blocks.forEach((block) => {
-        // 先打标再回放：公式提示线的类与下移量都要跟着这次变更后的 DOM 走。
+        // 先打标再回放：簇内公式的成员类要跟着这次变更后的 DOM 走。
         markClusterMath(block);
         replayBlockUnveil(this.unveilStore, block);
       });
@@ -600,26 +605,22 @@ export default class ClozePlugin extends Plugin {
   }
 
   private handleProtyleStatic(containerEl: HTMLElement) {
-    const wysiwyg = containerEl.querySelector<HTMLElement>('.protyle-wysiwyg');
-    if (!wysiwyg) return;
+    if (!containerEl.querySelector('.protyle-wysiwyg')) return;
 
-    wysiwyg.classList.toggle('sy-cloze-active', this.isClozeActive);
     this.markClusterMathIn(containerEl);
     replayUnveilInto(this.unveilStore, containerEl);
   }
 
   private handleProtyleDynamic(containerEl: HTMLElement) {
-    const wysiwyg = containerEl.querySelector<HTMLElement>('.protyle-wysiwyg');
-    if (!wysiwyg) return;
+    if (!containerEl.querySelector('.protyle-wysiwyg')) return;
 
-    wysiwyg.classList.toggle('sy-cloze-active', this.isClozeActive);
     this.markClusterMathIn(containerEl);
     replayUnveilInto(this.unveilStore, containerEl);
     this.scheduleRevealUpdate();
   }
 
   /**
-   * 给整篇里所有含遮罩的块打公式标记并量下移量。
+   * 给整篇里所有含遮罩的块打公式成员标记。
    *
    * 只从 kbd 反查所属块，不遍历全部块：文档里绝大多数块没有遮罩，逐块 querySelectorAll
    * 是白花的开销。同一个块里的多个 kbd 会被多次查到，用 Set 去重。
@@ -737,6 +738,10 @@ export default class ClozePlugin extends Plugin {
     preferredRange?: Range,
     preferSaved = false,
   ) {
+    // 桌面工具栏的 click 与 hotkey 传的是 Protyle 实例，命令回调传的是 IProtyle；
+    // 这里统一成带 toolbar / wysiwyg 的 IProtyle，否则会被误判成“没有活动编辑器”。
+    protyle = protyle?.protyle ?? protyle;
+
     const selection = window.getSelection();
     if (!selection) {
       showMessage(String(this.i18n.noSelection || '请先选中文本或将光标置于挖空块内'), 2000, 'info');
@@ -972,12 +977,9 @@ export default class ClozePlugin extends Plugin {
   }
 
   private updateGlobalStyles() {
+    // 遮蔽只由 body 上的开关向下生效，作用域在样式表里收进 .protyle-wysiwyg：
+    // 分栏、单元格编辑器这类后建的编辑器无需补类。
     document.body.classList.toggle('sy-cloze-active', this.isClozeActive);
-
-    const wysiwygs = document.querySelectorAll<HTMLElement>('.protyle-wysiwyg');
-    wysiwygs.forEach((wysiwyg) => {
-      wysiwyg.classList.toggle('sy-cloze-active', this.isClozeActive);
-    });
 
     if (!this.isClozeActive) {
       this.clearReveal();
@@ -989,18 +991,12 @@ export default class ClozePlugin extends Plugin {
   private cleanAllClozeArtifacts() {
     document.body.classList.remove('sy-cloze-active');
 
-    const wysiwygs = document.querySelectorAll<HTMLElement>('.protyle-wysiwyg');
-    wysiwygs.forEach((wysiwyg) => {
-      wysiwyg.classList.remove('sy-cloze-active');
-    });
-
     // 插件卸载后这些类失去 CSS 依托，留在 DOM 上只是垃圾，一并清掉。
     document.querySelectorAll<HTMLElement>(`.${UNVEIL_CLASS}, .${HIDING_CLASS}`).forEach((el) => {
       el.classList.remove(UNVEIL_CLASS, HIDING_CLASS);
     });
     document.querySelectorAll<HTMLElement>(`.${CLUSTER_MATH_CLASS}`).forEach((el) => {
       el.classList.remove(CLUSTER_MATH_CLASS);
-      el.style.removeProperty(LINE_DROP_VAR);
     });
 
     this.clearReveal();
