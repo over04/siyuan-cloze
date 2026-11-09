@@ -1,8 +1,10 @@
 import { Plugin, showMessage, Setting, getActiveEditor } from 'siyuan';
 import {
+  BLANK_CLASS,
   CLUSTER_MATH_CLASS,
   INVISIBLE_TEXT,
   KBD_SELECTOR,
+  LINE_DROP_VAR,
   REVEAL_CLASS,
   UNVEIL_CLASS,
   findClustersInRange,
@@ -112,6 +114,7 @@ export default class ClozePlugin extends Plugin {
     this.initDomObserver();
     this.initCellShortcutFallback();
 
+    this.markClusterMathIn(document.body);
     this.updateGlobalStyles();
   }
 
@@ -543,12 +546,12 @@ export default class ClozePlugin extends Plugin {
           ? (record.target as HTMLElement)
           : record.target.parentElement;
 
-        // 编辑器之外的变化与本插件无关：其它插件的界面里也会出现带 data-node-id 的元素
+        // 正文容器之外的变化与本插件无关：其它插件的界面里也会出现带 data-node-id 的元素
         // 与 kbd，打标和回放都不该落进去。新建编辑器由 loaded-protyle-static / dynamic 负责。
-        const editor = target?.closest('.protyle-wysiwyg');
+        const editor = target?.closest('.protyle-wysiwyg, .b3-typography');
         if (!editor) return;
 
-        const host = target?.closest('[data-node-id]');
+        const host = target?.closest('[data-node-id]') || editor;
         if (host) blocks.add(host);
 
         // 块被整体替换时，新块挂在父容器的 addedNodes 上，record.target 并不是它。
@@ -562,13 +565,20 @@ export default class ClozePlugin extends Plugin {
       });
 
       blocks.forEach((block) => {
-        // 先打标再回放：簇内公式的成员类要跟着这次变更后的 DOM 走。
+        // 先打标再回放：簇内公式的成员类与下划线偏移要跟着这次变更后的 DOM 走。
         markClusterMath(block);
-        replayBlockUnveil(this.unveilStore, block);
+        if (block.closest('.protyle-wysiwyg')) {
+          replayBlockUnveil(this.unveilStore, block);
+        }
       });
     });
 
-    this.domObserver.observe(document.body, { childList: true, subtree: true });
+    this.domObserver.observe(document.body, {
+      childList: true,
+      subtree: true,
+      attributes: true,
+      attributeFilter: ['data-render', 'data-content', 'data-type'],
+    });
   }
 
   private removeDomObserver() {
@@ -893,6 +903,9 @@ export default class ClozePlugin extends Plugin {
           stillMarked = cluster.some((el) => el.isConnected && el.matches(KBD_SELECTOR));
         }
 
+        if (startBlock.isConnected) {
+          markClusterMath(startBlock);
+        }
         this.scheduleRevealUpdate();
 
         // 创建同样要验收：事务被内核拒绝时前端 DOM 可能毫无变化，
@@ -995,8 +1008,9 @@ export default class ClozePlugin extends Plugin {
     document.querySelectorAll<HTMLElement>(`.${UNVEIL_CLASS}, .${HIDING_CLASS}`).forEach((el) => {
       el.classList.remove(UNVEIL_CLASS, HIDING_CLASS);
     });
-    document.querySelectorAll<HTMLElement>(`.${CLUSTER_MATH_CLASS}`).forEach((el) => {
-      el.classList.remove(CLUSTER_MATH_CLASS);
+    document.querySelectorAll<HTMLElement>(`.${CLUSTER_MATH_CLASS}, .${BLANK_CLASS}, ${KBD_SELECTOR}`).forEach((el) => {
+      el.classList.remove(CLUSTER_MATH_CLASS, BLANK_CLASS);
+      el.style.removeProperty(LINE_DROP_VAR);
     });
 
     this.clearReveal();

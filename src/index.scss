@@ -11,12 +11,14 @@
    遮蔽段就再也压不住常态规则（text-decoration-color 会被提示线抢走）。包起来之后，
    每条规则的特异性只由「作用域 + kbd」决定，先后顺序一眼可读。
 
-   作用域一律限定在 .protyle-wysiwyg：编辑器之外（其它插件界面、导出预览）不碰。
+   作用域限定在 .protyle-wysiwyg（编辑器）与 .b3-typography（导出预览、浮窗、卡片、
+   移动端渲染）：两者都是思源自己的正文容器，其余界面（其它插件面板）一处不碰。
    ========================================================================== */
 
 $kbd: 'span[data-type~="kbd"]';
 
-.protyle-wysiwyg {
+.protyle-wysiwyg,
+.b3-typography {
 
   /* ========================================================================
      一、中和 kbd 自带的键帽外观
@@ -104,13 +106,35 @@ $kbd: 'span[data-type~="kbd"]';
      二、常态提示线
 
      用 text-decoration 画：不参与排版，跨行时每行各自一条。绝对定位伪元素在多行
-     元素上会拉出一条贯穿整段的长线，公式那边还得靠 display:inline-block 才量得出
-     盒底，那会把公式排版改掉。自带下划线的标记、删除线、行内公式与行内代码不再叠线。
+     元素上会拉出一条贯穿整段的长线。自带下划线的标记、删除线与行内代码不再叠线。
+     行内公式是 KaTeX 的行内块，线画不到它里面，单独用伪元素补上那一段；
+     簇内含深公式时由 JS 写入 --sy-cloze-line-drop，让公式与同行文本切片的提示线
+     一起下移到公式最低点下方，避免横穿分式分母、积分号与矩阵。
+     公式嵌在切片里面时（表格单元格里就是这种形态）整条线会横穿公式，这种切片不画线。
      ======================================================================== */
-  #{$kbd}:where(:not([data-type~="u"]):not([data-type~="a"]):not([data-type~="tag"]):not([data-type~="inline-memo"]):not([data-type~="block-ref"]):not([data-type~="file-annotation-ref"]):not([data-type~="virtual-block-ref"]):not([data-type~="s"]):not([data-type~="inline-math"]):not([data-type~="code"])) {
+  #{$kbd}:where(:not([data-type~="u"]):not([data-type~="a"]):not([data-type~="tag"]):not([data-type~="inline-memo"]):not([data-type~="block-ref"]):not([data-type~="file-annotation-ref"]):not([data-type~="virtual-block-ref"]):not([data-type~="s"]):not([data-type~="inline-math"]):not([data-type~="code"])):not(:has(span[data-type~="inline-math"])) {
     text-decoration: underline dashed var(--b3-theme-primary, rgba(130, 130, 130, .85)) !important;
     text-decoration-thickness: 2px !important;
-    text-underline-offset: 2px !important;
+    text-underline-offset: calc(2px + var(--sy-cloze-line-drop, 0em)) !important;
+  }
+
+  span.sy-cloze-math {
+    position: relative;
+  }
+
+  span.sy-cloze-math::before {
+    content: '';
+    position: absolute;
+    left: 0;
+    right: 0;
+    bottom: calc(-2px - var(--sy-cloze-line-drop, 0em));
+    border-bottom: 2px dashed var(--b3-theme-primary, rgba(130, 130, 130, .85));
+    pointer-events: none;
+  }
+
+  /* 被公式切开的空切片只剩零宽字符，画出来是孤零零一小段，整簇靠公式那段接上 */
+  #{$kbd}.sy-cloze-blank {
+    text-decoration: none !important;
   }
 
   /* ========================================================================
@@ -148,6 +172,18 @@ $kbd: 'span[data-type~="kbd"]';
     padding: .2em .4em !important;
     border-radius: var(--b3-border-radius) !important;
   }
+
+  /* 高光、备注的底色与文字颜色同样被 kbd 压住，按主题变量写回。
+     当前命中的浅色版与加亮描边归思源自己管，留给它们各自的规则。 */
+  #{$kbd}[data-type~="mark"]:not(.mark--hl),
+  #{$kbd}[data-type~="search-mark"]:not(.search-mark--hl) {
+    background-color: var(--b3-protyle-inline-mark-background) !important;
+    color: var(--b3-protyle-inline-mark-color) !important;
+  }
+
+  #{$kbd}[data-type~="inline-memo"] {
+    background-color: var(--b3-card-info-background) !important;
+  }
 }
 
 /* ==========================================================================
@@ -172,21 +208,28 @@ body.sy-cloze-active .protyle-wysiwyg {
     text-decoration-color: transparent !important;
   }
 
+  span.sy-cloze-math:not(.sy-cloze-reveal):not(.sy-cloze-unveiled)::before,
+  span[data-type~="kbd"][data-type~="inline-math"]:not(.sy-cloze-reveal):not(.sy-cloze-unveiled)::before {
+    border-bottom-color: transparent !important;
+  }
+
   /* 遮蔽态的命中区外扩：blur 让模糊块看起来比实际宽一圈，内边距归零后更明显。
      ::before 空着不用，::after 留给思源行内公式的方向标记。 */
-  span[data-type~="kbd"]:not(.sy-cloze-reveal):not(.sy-cloze-unveiled)::before {
+  span[data-type~="kbd"]:not(.sy-cloze-reveal):not(.sy-cloze-unveiled)::before,
+  span.sy-cloze-math:not(.sy-cloze-reveal):not(.sy-cloze-unveiled)::before {
     content: '' !important;
     position: absolute !important;
     left: -6px !important;
     right: -6px !important;
     top: -.4em !important;
-    bottom: -.4em !important;
+    bottom: calc(-.4em - var(--sy-cloze-line-drop, 0em)) !important;
     background: transparent !important;
     pointer-events: auto !important;
   }
 
   /* 手型光标只在遮蔽开启时出现 */
-  span[data-type~="kbd"] {
+  span[data-type~="kbd"],
+  span.sy-cloze-math {
     cursor: pointer !important;
   }
 }
@@ -198,7 +241,9 @@ body.sy-cloze-active .protyle-wysiwyg {
    回放补类不带它，因此思源重建 DOM 不会产生任何可见动画。
    ========================================================================== */
 .protyle-wysiwyg span[data-type~="kbd"].sy-cloze-animating,
-.protyle-wysiwyg span[data-type~="kbd"].sy-cloze-animating * {
+.protyle-wysiwyg span[data-type~="kbd"].sy-cloze-animating *,
+.protyle-wysiwyg span.sy-cloze-math.sy-cloze-animating,
+.protyle-wysiwyg span.sy-cloze-math.sy-cloze-animating * {
   transition: filter .25s ease-in-out, opacity .25s ease-in-out !important;
 }
 

@@ -167,12 +167,23 @@ test('裸 kbd 被中和成普通文字，只留提示线', () => {
   assert.equal(declarationsFor(el, 'font').length, 1, '只能用 font 简写整体中和');
 });
 
-test('编辑器之外的 kbd 不命中任何插件规则', () => {
+test('正文容器之外的 kbd 不命中任何插件规则', () => {
   document.body.className = 'sy-cloze-active';
   document.body.innerHTML = '<div class="protyle-wysiwyg"></div><div class="other-plugin"><span id="outside" data-type="kbd">abc</span></div>';
 
   const outside = document.getElementById('outside');
   assert.equal(matchesAnyRule(outside), false, '样式必须限定在 .protyle-wysiwyg 内，否则其它插件的界面会被一起改写');
+});
+
+test('导出预览的正文容器同样中和', () => {
+  document.body.className = '';
+  document.body.innerHTML = '<div class="b3-typography"><span id="exported" data-type="kbd">abc</span></div>';
+
+  const el = document.getElementById('exported');
+  assert.equal(expectDeclared(el, 'font'), 'inherit');
+  assert.equal(expectDeclared(el, 'background-color'), 'transparent');
+  assert.equal(expectDeclared(el, 'background-image'), 'none');
+  assert.match(expectDeclared(el, 'text-decoration'), /^underline dashed var\(--b3-theme-primary/);
 });
 
 test('遮蔽态只在 body 开关打开时生效', () => {
@@ -185,14 +196,21 @@ test('遮蔽态只在 body 开关打开时生效', () => {
 
 /* -------------------------------------------------------- 自带底色的标记 */
 
-test('高光、备注、检索命中自带底色，插件不得改写', () => {
-  ['mark kbd', 'inline-memo kbd', 'search-mark kbd'].forEach((type) => {
+test('高光与检索命中的底色、文字颜色按主题变量写回', () => {
+  ['mark kbd', 'search-mark kbd'].forEach((type) => {
     const el = mount(type);
-    expectUntouched(el, 'background-color', '这类标记的底色就是它的语义');
+    assert.equal(expectDeclared(el, 'background-color'), 'var(--b3-protyle-inline-mark-background)');
+    assert.equal(expectDeclared(el, 'color'), 'var(--b3-protyle-inline-mark-color)');
   });
 
+  const memo = mount('inline-memo kbd');
+  assert.equal(expectDeclared(memo, 'background-color'), 'var(--b3-card-info-background)');
+
+  // 当前命中的浅色底与 mark--hl 的描边归思源自己管
   const current = mount('search-mark kbd', { className: 'search-mark--hl' });
-  expectUntouched(current, 'background-color', '当前命中的底色同样属于检索');
+  expectUntouched(current, 'background-color', '当前命中的底色属于检索');
+  const hl = mount('mark kbd', { className: 'mark--hl' });
+  expectUntouched(hl, 'background-color', 'mark--hl 的底色属于思源');
 });
 
 test('mark--hl 的外描边要留着', () => {
@@ -281,8 +299,8 @@ test('自定义文字样式的字体、颜色、底色交给行内 style', () =>
 test('文字样式叠在高光上时，底色仍归高光', () => {
   const el = mount('text mark kbd', { style: 'color: rgb(0, 128, 0)' });
 
-  expectUntouched(el, 'background-color', '高光的底色由 mark 自己的规则给');
-  assert.equal(expectDeclared(el, 'color'), 'inherit', '文字样式的颜色可以压，行内 style 会盖过这一条');
+  assert.equal(expectDeclared(el, 'background-color'), 'var(--b3-protyle-inline-mark-background)');
+  assert.equal(expectDeclared(el, 'color'), 'var(--b3-protyle-inline-mark-color)');
 });
 
 /* --------------------------------------------------------------- 遮蔽态 */

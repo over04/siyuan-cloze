@@ -31,6 +31,12 @@ export const MATH_SELECTOR = 'span[data-type~="inline-math"]';
 /** 簇成员里的行内公式加这个类，遮蔽规则据此把它与 kbd 一起模糊。 */
 export const CLUSTER_MATH_CLASS = 'sy-cloze-math';
 
+/** 簇里只剩零宽字符的 kbd 切片加这个类，样式表据此不给它画提示线。 */
+export const BLANK_CLASS = 'sy-cloze-blank';
+
+/** 簇内含深公式时写入的下划线垂直下移量（CSS 自定义属性名）。 */
+export const LINE_DROP_VAR = '--sy-cloze-line-drop';
+
 /** 划选时加在整簇每个成员上的透晓类，由 index.scss 的 :not() 反向生效。 */
 export const REVEAL_CLASS = 'sy-cloze-reveal';
 
@@ -65,8 +71,8 @@ export const isClozeBridge = (node: Node): boolean => {
  *
  * 成员规则：
  *   - kbd 元素直接入列并继续向两侧延伸；
- *   - 行内公式先挂起，只有在其之后（同方向）又遇到 kbd 时才入列，
- *     即「被两侧 kbd 夹住」的公式才算集群成员。
+ *   - 行内公式先挂起：其后（同方向）又遇到 kbd 时立刻入列，走到头仍未遇到时
+ *     也入列——划选范围以公式结尾（或开头）时，公式另一侧本来就没有切片。
  *
  * 公式必须入列：否则整簇透晓类加不到公式上，会出现
  * 「选中左侧公式整簇透晓、选中右侧 kbd 只有 kbd 透晓」的单向缺陷。
@@ -109,6 +115,11 @@ export const getClozeCluster = (
       break;
     }
 
+    // 走到头还没遇到下一个切片：夹在末尾（或开头）的公式仍属于这一簇。
+    // 划选范围正好结束在公式上时就是这种形态——Lute 只能把公式写成切片的兄弟，
+    // 公式另一侧不会再有切片，丢掉它会让这段答案在背诵态原样露出。
+    found.push(...pendingMath);
+
     return found;
   };
 
@@ -150,6 +161,18 @@ export const scanAdjacentCloze = (from: Node, direction: 'prev' | 'next'): HTMLE
  * 未被夹住的独立公式不归属任何集群——否则点击普通公式时会连带揭晓
  * 其相邻挖空的答案，在背诵模式下造成信息泄漏。
  */
+const scanClusterKbd = (from: Node, direction: 'prev' | 'next'): HTMLElement | null => {
+  let curr: Node | null = from;
+  while (curr) {
+    curr = direction === 'prev' ? curr.previousSibling : curr.nextSibling;
+    if (!curr) return null;
+    if (isClozeBridge(curr) || isMath(curr)) continue;
+    if (isKbd(curr)) return curr;
+    return null;
+  }
+  return null;
+};
+
 export const resolveClozeAnchor = (node: Node | null): HTMLElement | null => {
   if (!node) return null;
   const el = node.nodeType === Node.ELEMENT_NODE ? (node as HTMLElement) : node.parentElement;
@@ -161,8 +184,11 @@ export const resolveClozeAnchor = (node: Node | null): HTMLElement | null => {
   const math = el.closest<HTMLElement>(MATH_SELECTOR);
   if (!math) return null;
 
-  const prevKbd = scanAdjacentCloze(math, 'prev');
-  const nextKbd = scanAdjacentCloze(math, 'next');
+  const prevKbd = scanClusterKbd(math, 'prev');
+  const nextKbd = scanClusterKbd(math, 'next');
+  if (math.classList.contains(CLUSTER_MATH_CLASS)) {
+    return prevKbd || nextKbd;
+  }
   return prevKbd && nextKbd ? prevKbd : null;
 };
 
@@ -341,15 +367,87 @@ export const getClusterKey = (block: Element | null, cluster: HTMLElement[]): st
 };
 
 /**
- * 给块内属于某个簇的行内公式打上簇成员类。
+ * 读取单个行内公式在基线以下的最大深度（单位为 KaTeX 的 em）。
  *
- * 公式是 kbd 的兄弟而不是后代，CSS 的相邻兄弟只能覆盖「kbd 紧跟一个公式」，覆盖不到
- * 「kbd 公式 公式 kbd」里排在后面的那些——而簇里连续多个公式是常态（一个矩阵公式后面
- * 紧跟一个 `~` 符号的公式）。按同一套簇计算打标，顺带把「紧挨遮罩但不属于这个遮罩」
- * 的公式排除在外。
+ * KaTeX 在每个 .base 首部写入 `<span class="strut" style="height:...em;vertical-align:-...em;">`，
+ * 其 vertical-align 负值即 TeX 排版引擎算出的基线以下深度。直接读取该内联样式字符串，
+ * 不触发任何布局重排。若 KaTeX 尚未完成渲染，则依据 data-content 中的数学结构给出下界。
+ */
+export const measureMathDepthEm = (mathEl: HTMLElement): number => {
+  let maxDepth = 0;
+
+  const struts = mathEl.querySelectorAll<HTMLElement>('.strut, [style*="vertical-align"]');
+  for (let i = 0; i < struts.length; i++) {
+    const style = struts[i].getAttribute('style') || '';
+    const match = /vertical-align\s*:\s*(-?\d+(?:\.\d+)?)em/i.exec(style);
+    if (!match) continue;
+    const val = Number(match[1]);
+    if (val < 0 && -val > maxDepth) {
+      maxDepth = -val;
+    }
+  }
+
+  const depthRows = mathEl.querySelectorAll<HTMLElement>('.vlist-t2 > .vlist-r:nth-child(2) > .vlist');
+  for (let i = 0; i < depthRows.length; i++) {
+    const style = depthRows[i].getAttribute('style') || '';
+    const match = /height\s*:\s*(\d+(?:\.\d+)?)em/i.exec(style);
+    if (!match) continue;
+    const val = Number(match[1]);
+    if (val > maxDepth) {
+      maxDepth = val;
+    }
+  }
+
+  const raw = mathEl.getAttribute('data-content') || '';
+  if (!raw) return maxDepth;
+
+  let depth = maxDepth;
+  if (/\\begin\{(?:[bpvBV]?matrix|cases|dcases|rcases|aligned|align|array|smallmatrix|split|gather|gathered|subarray)\}|\\substack\b/.test(raw)) {
+    const rows = raw.split(/\\\\/).length;
+    depth = Math.max(depth, Math.max(0.55, (rows - 1) * 0.6 + 0.35));
+  }
+  if (
+    /\\(?:dfrac|cfrac)\b/.test(raw) ||
+    /\\limits\s*_/.test(raw) ||
+    /\\(?:sum|prod|coprod|bigcup|bigcap|bigoplus|bigotimes|lim|limsup|liminf|sup|inf|max|min)\s*(?:\\limits\s*)?_/.test(raw) ||
+    (/\\displaystyle\b/.test(raw) && /\\(?:frac|i+nt|oint|sum|prod|coprod|bigcup|bigcap|lim)\b/.test(raw))
+  ) {
+    depth = Math.max(depth, 1.15);
+  }
+  if (/\\(?:underbrace|underset)\b/.test(raw)) {
+    depth = Math.max(depth, 1.05);
+  }
+  if (/\\(?:d?frac|tfrac)\s*\{[^{}]*\}\s*\{[^}]*\\(?:d?frac|tfrac)/.test(raw)) {
+    depth = Math.max(depth, 0.75);
+  }
+  if (/\\(?:frac|tfrac|binom|dbinom|tbinom)\b/.test(raw)) {
+    depth = Math.max(depth, 0.42);
+  }
+  if (/\\(?:i+nt|oint|sum|prod|coprod|bigcup|bigcap|bigoplus|bigotimes|lim|limsup|liminf|sup|inf|max|min)\b/.test(raw)) {
+    depth = Math.max(depth, 0.36);
+  }
+  if (/\\(?:left|right|bigl|bigr|Bigl|Bigr|biggl|biggr|Biggl|Biggr|vert|Vert)\b|[|()[\]{}]/.test(raw)) {
+    depth = Math.max(depth, 0.25);
+  }
+  if (/[_]|\\sqrt\b|[gjpqy]|\\(?:mu|rho|phi|varphi|chi|psi|eta|gamma|beta|zeta|xi)\b/.test(raw)) {
+    depth = Math.max(depth, 0.2);
+  }
+  return depth;
+};
+
+/**
+ * 给块内属于某个簇的行内公式打上簇成员类，并按簇内最大公式深度同步下划线偏移量。
  *
- * 这个类供遮蔽规则使用：Markdown 往返会把簇内公式上的 kbd 去掉（`<kbd>a</kbd>$x$`
- * 读回时公式只有 inline-math），不按簇统一打标，那个公式在背诵态就会原样露出答案。
+ * 公式是 kbd 的兄弟节点，CSS 的相邻兄弟选择器覆盖不到「kbd 公式 公式 kbd」里排在后面的
+ * 公式。按同一套簇计算打标，同时把紧挨遮罩但不属于该遮罩的独立公式排除在外。
+ *
+ * Markdown 往返会把簇内公式上的 kbd 去掉（`<kbd>a</kbd>$x$` 读回时公式只有 inline-math），
+ * 遮蔽规则与提示线规则都靠 CLUSTER_MATH_CLASS 命中它。只剩零宽字符的切片打上 BLANK_CLASS，
+ * 样式表把它们略过，由公式自身的提示线接上。
+ *
+ * 行内公式保持 display: inline，其元素盒底停在正文字体基线下方约 0.2em 处，而分式、积分、
+ * 矩阵等公式的可见内容会延伸到基线下方更深的位置。把整簇的最大下探深度折算为正文字号下的
+ * em 值写入 `--sy-cloze-line-drop`，让公式伪元素与同行文本切片的提示线一起避开公式底部。
  */
 export const markClusterMath = (block: Element): void => {
   const seen = new Set<HTMLElement>();
@@ -358,17 +456,60 @@ export const markClusterMath = (block: Element): void => {
     if (seen.has(kbd)) return;
 
     const cluster = getClozeCluster(kbd);
-    cluster.forEach((el) => seen.add(el));
+    const mathMembers: HTMLElement[] = [];
 
     cluster.forEach((el) => {
-      if (isMath(el)) el.classList.add(CLUSTER_MATH_CLASS);
+      seen.add(el);
+      if (el.matches(MATH_SELECTOR)) {
+        mathMembers.push(el);
+      }
+      // 切片里嵌套的公式同样是簇的一部分（表格单元格里就是这种形态）
+      el.querySelectorAll<HTMLElement>(MATH_SELECTOR).forEach((nested) => {
+        seen.add(nested);
+        mathMembers.push(nested);
+      });
+    });
+
+    let maxDepth = 0;
+    for (let i = 0; i < mathMembers.length; i++) {
+      const d = measureMathDepthEm(mathMembers[i]);
+      if (d > maxDepth) maxDepth = d;
+    }
+
+    const dropEm = maxDepth > 0 ? Math.round((maxDepth * 1.25 + 0.16) * 1000) / 1000 : 0;
+    const applyDrop = (node: HTMLElement) => {
+      if (dropEm > 0) {
+        node.style.setProperty(LINE_DROP_VAR, `${dropEm}em`);
+      } else {
+        node.style.removeProperty(LINE_DROP_VAR);
+      }
+    };
+
+    cluster.forEach((el) => {
+      applyDrop(el);
+      if (el.matches(MATH_SELECTOR)) {
+        el.classList.add(CLUSTER_MATH_CLASS);
+        return;
+      }
+      el.classList.toggle(BLANK_CLASS, ZW_ONLY_TEXT.test(el.textContent || ''));
+      el.querySelectorAll<HTMLElement>(MATH_SELECTOR).forEach((nested) => {
+        nested.classList.add(CLUSTER_MATH_CLASS);
+        applyDrop(nested);
+      });
     });
   });
 
-  // 本块内不再属于任何簇的公式要把类摘掉（遮罩被取消后它们就是普通公式了）。
+  // 本块内不再属于任何簇的成员要把类与偏移变量一并摘掉（遮罩被取消后它们恢复为普通元素）。
   block.querySelectorAll<HTMLElement>(MATH_SELECTOR).forEach((el) => {
     if (seen.has(el)) return;
     el.classList.remove(CLUSTER_MATH_CLASS);
+    el.style.removeProperty(LINE_DROP_VAR);
+  });
+
+  block.querySelectorAll<HTMLElement>(`.${BLANK_CLASS}`).forEach((el) => {
+    if (seen.has(el)) return;
+    el.classList.remove(BLANK_CLASS);
+    el.style.removeProperty(LINE_DROP_VAR);
   });
 };
 

@@ -17,13 +17,16 @@ import { fileURLToPath } from 'node:url';
 
 import { WJ, setupDom } from './helpers.mjs';
 import {
+  BLANK_CLASS,
   KBD_SELECTOR,
+  LINE_DROP_VAR,
   REVEAL_CLASS,
   UNVEIL_CLASS,
   getClozeCluster,
   getClusterKey,
   listBlockClusters,
   markClusterMath,
+  measureMathDepthEm,
   parseClusterKey,
   resolveProtyleRoot,
 } from '../src/cluster.ts';
@@ -1067,7 +1070,7 @@ test('JS 与 CSS 的契约：遮蔽态的命中区要跟着模糊范围一起外
   assert.ok(maskRule.includes('position: relative'), '遮蔽段要给外扩的伪元素留定位参照');
 
   // 外扩走 ::before：思源把 ::after 用在行内公式的方向标记上，占用了会改掉公式的排版。
-  const hitRule = rules.find((rule) => rule.includes('::before') && rule.includes('pointer-events'));
+  const hitRule = rules.find((rule) => rule.includes('::before') && rule.includes('pointer-events') && rule.includes(KBD_SELECTOR));
   assert.ok(hitRule, '遮蔽态缺少外扩命中区');
   assert.ok(/left:\s*-\d/.test(hitRule) && /right:\s*-\d/.test(hitRule), '命中区要左右外扩');
   assert.ok(hitRule.includes(KBD_SELECTOR), '命中区必须挂在 kbd 上，否则事件目标不再是遮罩');
@@ -1158,6 +1161,47 @@ test('JS 与 CSS 的契约：提示线用 text-decoration 画，且让开自己�
   );
 });
 
+test('JS 与 CSS 的契约：公式的提示线由伪元素画，空切片不画线', () => {
+  const stripped = scss.replace(/\/\*[\s\S]*?\*\//g, '');
+  const rules = stripped.split('}');
+
+  // 公式是 KaTeX 的行内块，text-decoration 画不到它里面，这一段只能另画一条。
+  const lineRule = rules.find(
+    (rule) => rule.includes('span.sy-cloze-math::before') && rule.includes('border-bottom'),
+  );
+  assert.ok(lineRule, '簇内公式缺少提示线');
+  assert.ok(
+    /border-bottom:\s*2px dashed var\(--b3-theme-primary/.test(lineRule),
+    '公式的线与正文同色同粗细',
+  );
+  assert.ok(
+    lineRule.includes(`var(${LINE_DROP_VAR}`),
+    '公式提示线必须读取深公式下移变量，避免横穿分式分母与积分号',
+  );
+  assert.ok(lineRule.includes('pointer-events: none'), '线不能挡住点击');
+
+  const maskSection = stripped.slice(stripped.indexOf('body.sy-cloze-active'));
+  const hideRule = maskSection.split('}').find(
+    (rule) => rule.includes('span.sy-cloze-math') && rule.includes('border-bottom-color: transparent'),
+  );
+  assert.ok(hideRule, '遮蔽态要把公式的线一起藏掉');
+
+  assert.ok(
+    /\.sy-cloze-blank\s*\{[^}]*text-decoration:\s*none/.test(stripped),
+    '只剩零宽字符的切片不画线，否则整簇两端会留下孤零零的一小段',
+  );
+
+  const kbdLine = rules.find((rule) => rule.includes('text-decoration: underline dashed'));
+  assert.ok(
+    kbdLine.includes(':not(:has(span[data-type~="inline-math"]))'),
+    '公式嵌在切片里时整条线会横穿公式，这种切片必须排除',
+  );
+  assert.ok(
+    kbdLine.includes(`var(${LINE_DROP_VAR}`),
+    '文本切片的 text-underline-offset 必须同步读取深公式下移变量',
+  );
+});
+
 test('JS 契约：簇成员公式由 markClusterMath 打类', () => {
   const cluster = fs.readFileSync(path.join(repoRoot, 'src/cluster.ts'), 'utf8');
   const source = fs.readFileSync(path.join(repoRoot, 'src/index.ts'), 'utf8');
@@ -1201,7 +1245,7 @@ test('markClusterMath：簇内相邻的多个公式都打标，簇外公式不�
     `<span data-type="inline-math" data-subtype="math" data-content="${content}" contenteditable="false" class="render-node">${WJ}</span>`;
 
   const block = element(
-    `<div data-node-id="mk-1">${kbd('若')}${math('A')}${math('\\sim')}${kbd('B')}${math('孤')}</div>`,
+    `<div data-node-id="mk-1">${kbd('若')}${math('A')}${math('\\sim')}${kbd('B')}正文${math('孤')}</div>`,
   );
 
   markClusterMath(block);
@@ -1209,7 +1253,54 @@ test('markClusterMath：簇内相邻的多个公式都打标，簇外公式不�
   const marked = Array.from(block.querySelectorAll('.sy-cloze-math')).map((el) =>
     el.getAttribute('data-content'),
   );
-  assert.deepEqual(marked, ['A', '\\sim'], '簇内两个相邻公式都要打标，簇外那个不打标');
+  assert.deepEqual(marked, ['A', '\\sim'], '簇内两个相邻公式都要打标，隔着正文的那个不打标');
+});
+
+test('markClusterMath：切片里嵌套的公式也要打标', () => {
+  const block = element(
+    `<div data-node-id="mk-6"><span data-type="kbd">${WJ}<span data-type="inline-math" data-subtype="math" data-content="x" contenteditable="false">${WJ}</span></span>${kbd('答')}</div>`,
+  );
+  markClusterMath(block);
+
+  assert.equal(
+    block.querySelectorAll('.sy-cloze-math').length,
+    1,
+    '嵌在切片里的公式同样是簇成员，否则它不会有提示线',
+  );
+});
+
+test('markClusterMath：划选范围以公式结尾时，公式仍属这一簇', () => {
+  const math = (content) =>
+    `<span data-type="inline-math" data-subtype="math" data-content="${content}" contenteditable="false" class="render-node">${WJ}</span>`;
+
+  const block = element(`<div data-node-id="mk-5">${kbd('满足')}${math('P')}</div>`);
+  markClusterMath(block);
+
+  assert.equal(block.querySelectorAll('.sy-cloze-math').length, 1, '末尾的公式没有右侧切片，仍要打标');
+});
+
+test('markClusterMath：只剩零宽字符的切片打上空切片类', () => {
+  const math = (content) =>
+    `<span data-type="inline-math" data-subtype="math" data-content="${content}" contenteditable="false" class="render-node">${WJ}</span>`;
+
+  const block = element(`<div data-node-id="mk-3">${kbd('')}${math('A')}${kbd('答')}</div>`);
+  markClusterMath(block);
+
+  const [first, last] = Array.from(block.querySelectorAll(KBD_SELECTOR));
+  assert.ok(first.classList.contains(BLANK_CLASS), '只剩零宽字符的切片不画线');
+  assert.equal(last.classList.contains(BLANK_CLASS), false, '带正文的切片照常画线');
+});
+
+test('markClusterMath：切片补上正文后空切片类要摘掉', () => {
+  const block = element(`<div data-node-id="mk-4">${kbd('')}${kbd('答')}</div>`);
+  markClusterMath(block);
+
+  const [first] = Array.from(block.querySelectorAll(KBD_SELECTOR));
+  assert.ok(first.classList.contains(BLANK_CLASS));
+
+  first.textContent = `${WJ}若`;
+  markClusterMath(block);
+  assert.equal(first.classList.contains(BLANK_CLASS), false);
 });
 
 test('markClusterMath：遮罩取消后公式的类要摘掉', () => {
@@ -1229,4 +1320,40 @@ test('markClusterMath：遮罩取消后公式的类要摘掉', () => {
     0,
     '取消遮罩后公式就是普通公式了，标记必须摘掉，否则它会一直带着一条提示线',
   );
+});
+
+test('markClusterMath：按 KaTeX strut 深度与公式源码同步下移整簇提示线', () => {
+  const renderedIntegral = `<span data-type="inline-math" data-subtype="math" data-content="\\int \\frac{1}{\\cos x} dx = \\ln |\\sec x + \\tan x| + C" contenteditable="false" class="render-node"><span class="katex"><span class="katex-html"><span class="base"><span class="strut" style="height:1.1901em;vertical-align:-0.345em;"></span></span><span class="base"><span class="strut" style="height:1em;vertical-align:-0.25em;"></span></span><span class="base"><span class="strut" style="height:0.6833em;"></span></span></span></span></span>`;
+  const unrenderedSeries = `<span data-type="inline-math" data-subtype="math" data-content="= \\sum_{n=1}^{\\infty} (-1)^{n-1} \\frac{x^n}{n}" contenteditable="false" class="render-node">${WJ}</span>`;
+  const shallowMath = `<span data-type="inline-math" data-subtype="math" data-content="x" contenteditable="false" class="render-node"><span class="katex"><span class="katex-html"><span class="base"><span class="strut" style="height:0.4306em;"></span></span></span></span></span>`;
+
+  const block = element(
+    `<div data-node-id="mk-depth">${kbd('积分')}${renderedIntegral}${kbd('结果')}间隔${kbd('级数')}${unrenderedSeries}间隔${kbd('浅')}${shallowMath}</div>`,
+  );
+  markClusterMath(block);
+
+  const [kbd1, kbd2, kbd3, kbd4] = Array.from(block.querySelectorAll(KBD_SELECTOR));
+  const [math1, math2, math3] = Array.from(block.querySelectorAll('.sy-cloze-math'));
+
+  assert.equal(measureMathDepthEm(math1), 0.42);
+  assert.equal(measureMathDepthEm(math2), 1.15);
+  assert.equal(measureMathDepthEm(math3), 0);
+
+  const drop1 = math1.style.getPropertyValue(LINE_DROP_VAR);
+  assert.equal(drop1, '0.685em', '分式与积分公式按深度折算下移量');
+  assert.equal(kbd1.style.getPropertyValue(LINE_DROP_VAR), drop1, '同簇左侧文本切片同步下移');
+  assert.equal(kbd2.style.getPropertyValue(LINE_DROP_VAR), drop1, '同簇右侧文本切片同步下移');
+
+  const drop2 = math2.style.getPropertyValue(LINE_DROP_VAR);
+  assert.equal(drop2, '1.598em', '带上下限的求和与极限公式整簇下移到下标下方');
+  assert.equal(kbd3.style.getPropertyValue(LINE_DROP_VAR), drop2);
+
+  assert.equal(math3.style.getPropertyValue(LINE_DROP_VAR), '', '无基线以下深度的公式不额外下移');
+  assert.equal(kbd4.style.getPropertyValue(LINE_DROP_VAR), '', '浅公式同簇切片不额外下移');
+
+  // 取消遮罩后，公式上的下移变量一并清除
+  kbd1.replaceWith(...kbd1.childNodes);
+  kbd2.replaceWith(...kbd2.childNodes);
+  markClusterMath(block);
+  assert.equal(math1.style.getPropertyValue(LINE_DROP_VAR), '');
 });
