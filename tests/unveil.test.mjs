@@ -1269,14 +1269,19 @@ test('markClusterMath：切片里嵌套的公式也要打标', () => {
   );
 });
 
-test('markClusterMath：划选范围以公式结尾时，公式仍属这一簇', () => {
+test('markClusterMath：紧邻遮罩的独立公式不得打标，遮罩自身是公式时照常打标', () => {
   const math = (content) =>
     `<span data-type="inline-math" data-subtype="math" data-content="${content}" contenteditable="false" class="render-node">${WJ}</span>`;
+  const kbdMath = (content) =>
+    `<span data-type="kbd inline-math" data-subtype="math" data-content="${content}" contenteditable="false" class="render-node">${WJ}</span>`;
 
-  const block = element(`<div data-node-id="mk-5">${kbd('满足')}${math('P')}</div>`);
+  const block = element(`<div data-node-id="mk-5">${math('A')}${kbdMath('B')}</div>`);
   markClusterMath(block);
 
-  assert.equal(block.querySelectorAll('.sy-cloze-math').length, 1, '末尾的公式没有右侧切片，仍要打标');
+  const marked = Array.from(block.querySelectorAll('.sy-cloze-math')).map((el) =>
+    el.getAttribute('data-content'),
+  );
+  assert.deepEqual(marked, ['B'], '左侧公式是紧邻遮罩的普通内容，打标会让它跟着一起被遮住');
 });
 
 test('markClusterMath：只剩零宽字符的切片打上空切片类', () => {
@@ -1328,11 +1333,11 @@ test('markClusterMath：按 KaTeX strut 深度与公式源码同步下移整簇�
   const shallowMath = `<span data-type="inline-math" data-subtype="math" data-content="x" contenteditable="false" class="render-node"><span class="katex"><span class="katex-html"><span class="base"><span class="strut" style="height:0.4306em;"></span></span></span></span></span>`;
 
   const block = element(
-    `<div data-node-id="mk-depth">${kbd('积分')}${renderedIntegral}${kbd('结果')}间隔${kbd('级数')}${unrenderedSeries}间隔${kbd('浅')}${shallowMath}</div>`,
+    `<div data-node-id="mk-depth">${kbd('积分')}${renderedIntegral}${kbd('结果')}间隔${kbd('级数')}${unrenderedSeries}${kbd('的')}间隔${kbd('浅')}${shallowMath}${kbd('式')}</div>`,
   );
   markClusterMath(block);
 
-  const [kbd1, kbd2, kbd3, kbd4] = Array.from(block.querySelectorAll(KBD_SELECTOR));
+  const [kbd1, kbd2, kbd3, kbd4, kbd5, kbd6] = Array.from(block.querySelectorAll(KBD_SELECTOR));
   const [math1, math2, math3] = Array.from(block.querySelectorAll('.sy-cloze-math'));
 
   assert.equal(measureMathDepthEm(math1), 0.42);
@@ -1347,9 +1352,11 @@ test('markClusterMath：按 KaTeX strut 深度与公式源码同步下移整簇�
   const drop2 = math2.style.getPropertyValue(LINE_DROP_VAR);
   assert.equal(drop2, '1.598em', '带上下限的求和与极限公式整簇下移到下标下方');
   assert.equal(kbd3.style.getPropertyValue(LINE_DROP_VAR), drop2);
+  assert.equal(kbd4.style.getPropertyValue(LINE_DROP_VAR), drop2, '公式右侧的切片同样跟着下移');
 
   assert.equal(math3.style.getPropertyValue(LINE_DROP_VAR), '', '无基线以下深度的公式不额外下移');
-  assert.equal(kbd4.style.getPropertyValue(LINE_DROP_VAR), '', '浅公式同簇切片不额外下移');
+  assert.equal(kbd5.style.getPropertyValue(LINE_DROP_VAR), '', '浅公式同簇切片不额外下移');
+  assert.equal(kbd6.style.getPropertyValue(LINE_DROP_VAR), '', '浅公式同簇右侧切片不额外下移');
 
   // 取消遮罩后，公式上的下移变量一并清除
   kbd1.replaceWith(...kbd1.childNodes);

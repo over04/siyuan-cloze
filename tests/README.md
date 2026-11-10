@@ -89,6 +89,7 @@ MutationRecord 后半段时不会自愈。
 把遮蔽态的隐藏从 `text-decoration-color` 挪回元素本身 → 同一条用例失败；
 给 `.sy-cloze-math` 加回 `display: inline-block` → 同一条用例失败；
 去掉 `markClusterMath` 的打标、或去掉它的摘类分支 → 「簇内相邻的多个公式都打标」/「遮罩取消后公式的类要摘掉」失败；
+把簇外公式的兜底入列加回 `getClozeCluster` → 「紧邻的独立公式不得并入遮罩」与「紧邻遮罩的独立公式不得打标」失败；
 在 `commitToggle` 里加回 `root.querySelector(\`[data-node-id=…]\`)` → 「提交切换时不得按块 ID 直接取第一个元素」失败；
 去掉一级的 `target.root.contains(target.anchor)` 校验 → 同一条用例失败；
 把 `this.isClozeActive = true` 加回去 → 「创建或取消遮罩不得顺手切换填空模式」失败。
@@ -110,8 +111,9 @@ MutationRecord 后半段时不会自愈。
 `text-decoration-color: transparent` 藏线，删除线标记排除在外——它用的也是 text-decoration。
 
 行内公式不参与打线，也不得改 `display`：一旦改成 `inline-block`，公式的基线与行高都会跟着变。
-公式在遮蔽态依靠 `.sy-cloze-math` 类一起模糊，这个类由 `markClusterMath` 按簇计算打上，因为
-Markdown 往返会把簇内公式上的 kbd 去掉。
+公式在遮蔽态依靠 `.sy-cloze-math` 类一起模糊，这个类由 `markClusterMath` 按簇计算打上：遮罩跨过
+公式时，公式可能是与切片平级、自身不带 kbd 标记的节点（`<kbd>…</kbd>$x$<kbd>…</kbd>`）。簇的计算只认
+被切片夹住的公式；紧挨遮罩、位于整簇之外的公式一律不算成员。
 
 公式是 kbd 的**兄弟**而不是后代：思源把一次挖空拆成多个 kbd 切片，行内公式是原子节点、kbd 无法跨越它，所以簇是「kbd 公式 kbd」这样的平级结构（见 cluster.ts 的兄弟遍历）。**不要用 CSS 选择器去找簇成员公式**：相邻兄弟 `+` 只能覆盖「kbd 紧跟一个公式」，覆盖不到「kbd 公式 公式 kbd」里排在后面的那些——而簇里连续多个公式是常态（一个矩阵公式后面紧跟一个 `~` 符号的公式），它还会误伤紧挨遮罩但不属于这个遮罩的公式；后代选择器则一个元素都命不中。簇成员由 `markClusterMath` 按同一套簇计算打上 `.sy-cloze-math`。
 

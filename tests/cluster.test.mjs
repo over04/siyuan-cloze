@@ -92,6 +92,44 @@ test('桥接判据：只有纯零宽字符才是桥', () => {
   assert.equal(INVISIBLE_TEXT.test('\u200b \u200b'), true);
 });
 
+test('紧邻的独立公式不得并入遮罩：只选一个公式时另一个原样保留', () => {
+  const ZW = '\u200b';
+  const WJ = '\u2060';
+  const math = (type, content) =>
+    `<span data-type="${type}" data-subtype="math" data-content="${content}" contenteditable="false" class="render-node">${WJ}</span>`;
+
+  // 两个公式直接相邻（中间只有零宽字符），只给右边那个创建遮罩。
+  const right = parse(`${ZW}${math('inline-math', 'A')}${ZW}${math('kbd inline-math', 'B')}${ZW}`);
+  assert.deepEqual(
+    getClozeCluster(right.querySelector(KBD_SELECTOR)).map(memberLabel),
+    ['$B$'],
+    '左侧公式在遮罩外面，不属于这一簇',
+  );
+
+  // 反方向同样成立。
+  const left = parse(`${ZW}${math('kbd inline-math', 'A')}${ZW}${math('inline-math', 'B')}${ZW}`);
+  assert.deepEqual(
+    getClozeCluster(left.querySelector(KBD_SELECTOR)).map(memberLabel),
+    ['$A$'],
+    '右侧公式在遮罩外面，不属于这一簇',
+  );
+});
+
+test('被切片夹住的公式仍属这一簇', () => {
+  const ZW = '\u200b';
+  const WJ = '\u2060';
+  const math = (content) =>
+    `<span data-type="inline-math" data-subtype="math" data-content="${content}" contenteditable="false" class="render-node">${WJ}</span>`;
+  const kbd = (text) => `<span data-type="kbd">${WJ}${text}</span>`;
+
+  const block = parse(`${ZW}${kbd('若')}${ZW}${math('A')}${ZW}${kbd('则')}${ZW}`);
+  assert.deepEqual(
+    getClozeCluster(block.querySelector(KBD_SELECTOR)).map(memberLabel),
+    ['若', '$A$', '则'],
+    '两侧都有切片时，中间的公式是遮罩的一部分',
+  );
+});
+
 test('kbd 选择器用 ~= 语义，不会误匹配 kbdish / kbd-span', () => {
   const block = parse('<span data-type="kbdish">a</span><span data-type="kbd-span">b</span><span data-type="kbd">c</span>');
   assert.equal(block.querySelectorAll(KBD_SELECTOR).length, 1);
