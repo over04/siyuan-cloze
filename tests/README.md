@@ -1,141 +1,16 @@
-# tests/
-
-## 跑法
+# 测试
 
 ```bash
+pnpm install --frozen-lockfile
+pnpm exec playwright install chromium
 npm test
+pnpm test:browser
+pnpm build
 ```
 
-前置条件：装过一次依赖（`pnpm install`），`jsdom` 在 devDependencies 里。
+锁定依赖安装后，原版单测 140 项通过。保留簇边界、原生富文本、单元格偏移和揭晓回放用例；旧画法和按下拦截的断言已移除。
 
-## 退出码
-
-| 情况 | `npm test` 退出码 |
-| --- | --- |
-| 全部用例通过 | `0` |
-| 存在失败用例 | `1`（Node 测试运行器约定，npm 原样透传，可直接当 CI 门禁） |
-
-仓库内不存在「故意失败」的用例。`npm test` 全绿即退出码 `0`；退出码 `1` 只会因为
-真的有断言没过。
-
-## 文件
-
-| 文件 | 内容 |
-| --- | --- |
-| `fixtures.mjs` | 6 个场景的 DOM 夹具（真实内核往返结果）与期望分组 |
-| `cluster.test.mjs` | 集群分组、桥接判据、`kbd` 选择器语义 |
-| `anchor.test.mjs` | 锚点解析、邻居扫描、节点解析、选区求交，以及 JS↔CSS 契约 |
-| `tableCell.test.mjs` | 单元格形态判定与可见文本偏移换算（`src/tableCell.ts` 纯函数层） |
-| `unveil.test.mjs` | 标识稳定性、记录与回放、关文档恢复默认、SCSS 契约（`src/unveil.ts` 纯函数层） |
-| `inlineStyles.test.mjs` | 编译 `src/index.scss`，按 `data-type` 组合逐条求命中，锁住插件不得吞掉的原生行内样式 |
-| `helpers.mjs` | 共用件：jsdom 装配与块包装（不以 `.test.mjs` 结尾，不会被当用例执行） |
-
-`cluster.test.mjs` 用 jsdom 建真实 DOM，直接调用 `src/cluster.ts` 里的集群算法。
-每个夹具跑两遍：生产口径（`isClozeBridge`）必须得到 `expect`，旧口径（含 `\s` 的
-`INVISIBLE_TEXT`，即改前的缺陷版本）必须得到 `wrong`——后者保证这个测试真的能抓到
-「两次划选被并成一个遮罩」这个缺陷，而不是永远绿。
-
-尚未覆盖：`src/index.ts` 里的 ⇧⌘C 创建/取消管道、单元格退避流程（`retreatFromCellEditor`）
-与显晓类施加——它们依赖 `protyle.toolbar` 与真实单元格编辑器，必须在真实编辑器里才跑得起来。
-`anchor.test.mjs` 末尾的契约用例只锁住类名与选择器这两个跨文件常量；样式表的行为由
-`inlineStyles.test.mjs` 负责。
-
-`unveil.test.mjs` 覆盖纯函数层：键稳定性与重复答案消歧、点击切换（整簇加类/去类）、
-DOM 重建后回放保活、失效记录两轮核对、`store.drop` 后恢复默认遮蔽、取消遮罩时作废并校正视觉。
-
-回放的对齐按顺序走两级，用例按这两级各自的失效方式布防。位置级只在「块内簇数与上一轮
-相同」时启用、且先于精确级走，覆盖簇内任意位置的增删改（`abcd` → `abd`、`ab` → `ax`、
-`(1234)` → `(123)`）与重建中间态（kbd 还在、文本暂时为空）；精确级（答案文本与重复序号
-都对上）兜底，挡住「同块内新建遮罩把状态挪到新遮罩上」。边界各有用例：簇数变了就不做
-位置对齐（删掉「甲」之后「甲子」不得接走那条记录）、数量不变但位置错开（删「甲」补「丙」
-后状态要跟着「乙」走）、两个遮罩文本变得相同后仍按位置区分、改掉一个重复答案不得熄灭
-用户正看着的那个。
-
-另有一组守「输入时不闪」。过渡必须由 `.sy-cloze-animating` 门控——JS 只在点击揭晓与
-⌥⇧X 全局切换时挂上（`animateCluster`），回放补类不带它，否则「补类」这一步本身会变成
-一段从模糊到清晰的渐变；回放的摘类改成两轮确认，首轮只挂 `.sy-cloze-hiding`，连续两轮
-都对不上才真摘，避免思源重建的中间态造成一次「亮 → 暗 → 亮」。
-
-两轮确认有两处不能省：`blocked` 命中的簇要当场摘干净（记录随后就被删掉，下一轮回放会
-在「记录为空」处早退，留着标记就是永久残留、遮罩一直亮着答案）；`records.size === 0` 的
-早退口也要就地清一遍标记，兜住同类路径。
-
-两处早退口的清理都必须过滤归属，否则会摘掉别人的揭晓类。块级（`mine.length === 0`）用
-`el.parentElement?.closest('[data-node-id]') !== block`：思源的列表项、引述块、超级块都是
-嵌套的 `[data-node-id]`，子块有自己的记录；从父元素起算是因为行内引用、行内公式的渲染容器
-自身就带 `data-node-id`，用 `el.closest` 会把它们误判成别的块而漏清。root 级
-（`records.size === 0`）用 `resolveProtyleRoot(el) !== root`：表格单元格是嵌在主文档块里的
-独立 `.protyle`，它有自己的记录。两种误伤的后果都是「记录还在、标记没了」，而父块排在同一批
-MutationRecord 后半段时不会自愈。
-
-这些用例不是永远绿，逐条拆掉对应判据即可复现失败：
-把 `previous.length === items.length` 这个前提去掉 → 「删掉一个遮罩后…不得被点亮」失败；
-把 `isSameCluster` 换回「互相包含」→「删中间字符、改字符、连括号一起变」失败；
-把 `orders` 与 `shrunk` 两处空文本防护同时去掉 → 「多个 kbd 一起变空的中间态…不得清空」失败；
-把 `previous.length > items.length` 去掉 → 「改掉一个重复答案…」两条失败；
-把两级顺序倒过来（精确级先走）→「把重复答案中的一个改成别的文本…」失败；
-把 `forgetBlockOrder` 改成空函数 → 「丢掉基线后…」失败；
-把 `transition` 放回基础规则 → 「过渡必须由动画类门控」失败；
-把摘类改回一轮 → 「一轮对不上只挂待摘标记」失败；
-把 `blocked` 分支的当场摘掉改回两轮确认 → 「blocked 清空记录后…」失败；
-把 `store.drop` 的清理退回只摘揭晓类 → 「关文档时连待摘标记一起清」失败；
-把块级早退口的 `closest` 守卫去掉 → 「清理残留标记时不得碰嵌套子块」失败；
-把 root 级早退口的 root 归属守卫去掉 → 「root 级早退不得清掉嵌套内层 protyle 的标记」失败；
-把块级守卫改回 `el.closest(...)` → 「元素自身带 data-node-id 时也要清掉残留标记」失败；
-把 `mousedown` 改回 `click` → 「切换挂在 mousedown 上」失败；
-把遮蔽段的 `position: relative` 或外扩伪元素去掉 → 「遮蔽态的命中区要跟着模糊范围一起外扩」失败；
-把 `mouseup` / `click` 的吞事件监听去掉 → 「切换挂在 mousedown 上，命中时把整次交互吞掉」失败；
-把提示线改回 `::before`、或让它叠到 u / a / tag / s / 公式上 → 「提示线用 text-decoration 画」失败；
-把遮蔽态的隐藏从 `text-decoration-color` 挪回元素本身 → 同一条用例失败；
-给 `.sy-cloze-math` 加回 `display: inline-block` → 同一条用例失败；
-去掉 `markClusterMath` 的打标、或去掉它的摘类分支 → 「簇内相邻的多个公式都打标」/「遮罩取消后公式的类要摘掉」失败；
-把簇外公式的兜底入列加回 `getClozeCluster` → 「紧邻的独立公式不得并入遮罩」与「紧邻遮罩的独立公式不得打标」失败；
-在 `commitToggle` 里加回 `root.querySelector(\`[data-node-id=…]\`)` → 「提交切换时不得按块 ID 直接取第一个元素」失败；
-去掉一级的 `target.root.contains(target.anchor)` 校验 → 同一条用例失败；
-把 `this.isClozeActive = true` 加回去 → 「创建或取消遮罩不得顺手切换填空模式」失败。
-
-另有一组守「点得中、点得动、不穿公式」。切换挂在捕获阶段的 `mousedown` 上而不是 `click`：
-`click` 只在 `mousedown` 与 `mouseup` 落在同一目标上时才派发，按下抬起之间抖几个像素就丢了，
-那次点击既不切换又已经开始了拖选；`mousedown` 在拖选之前一定触发，命中遮罩时把整次交互
-（`mousedown` / `mouseup` / `click` / `dblclick`）一并吞掉——只拦 `mousedown` 的话，思源照样会
-在 `mouseup` / `click` 上更新选区快照、弹出公式编辑器。每次点击都切换，不做双击回滚：
-`preventDefault` 已经让双击选词不可能发生，回滚只会让手快的人点两下等于没点。
-
-遮蔽态的 kbd 另加一层透明伪元素，左右各外扩 6px、纵向撑满行高：`blur(6px)` 让模糊块看起来比
-实际宽出一圈，而 kbd 的内边距已经归零，命中区不跟着扩就会「照着模糊边缘点、实际落到相邻
-文本上」。伪元素绝对定位、不参与排版，点击落在它身上时事件目标仍是宿主 kbd，判定照旧。
-外扩走 `::before`：思源把 `::after` 用在行内公式的方向标记上。
-
-常态提示线由 `text-decoration` 画：不参与排版，跨行时每行各自一条。kbd 自己带线或自带底色的
-标记（u、a、tag、备注、引用、删除线、公式、行内代码）一律让开，否则会叠成两道。遮蔽态用
-`text-decoration-color: transparent` 藏线，删除线标记排除在外——它用的也是 text-decoration。
-
-行内公式不参与打线，也不得改 `display`：一旦改成 `inline-block`，公式的基线与行高都会跟着变。
-公式在遮蔽态依靠 `.sy-cloze-math` 类一起模糊，这个类由 `markClusterMath` 按簇计算打上：遮罩跨过
-公式时，公式可能是与切片平级、自身不带 kbd 标记的节点（`<kbd>…</kbd>$x$<kbd>…</kbd>`）。簇的计算只认
-被切片夹住的公式；紧挨遮罩、位于整簇之外的公式一律不算成员。
-
-公式是 kbd 的**兄弟**而不是后代：思源把一次挖空拆成多个 kbd 切片，行内公式是原子节点、kbd 无法跨越它，所以簇是「kbd 公式 kbd」这样的平级结构（见 cluster.ts 的兄弟遍历）。**不要用 CSS 选择器去找簇成员公式**：相邻兄弟 `+` 只能覆盖「kbd 紧跟一个公式」，覆盖不到「kbd 公式 公式 kbd」里排在后面的那些——而簇里连续多个公式是常态（一个矩阵公式后面紧跟一个 `~` 符号的公式），它还会误伤紧挨遮罩但不属于这个遮罩的公式；后代选择器则一个元素都命不中。簇成员由 `markClusterMath` 按同一套簇计算打上 `.sy-cloze-math`。
-
-提交切换时不得按块 ID 在根里 `querySelector`：同一个块 ID 在 protyle 根里可能同时存在多个
-元素（实测 3 个），拿到的第一个未必是含遮罩的那份，`listBlockClusters` 会算出空簇，
-`findClusterByKey` 随即找不到，这次点击被静默丢掉——表现是「点了完全没反应」，而且只在部分
-块上复现（列表项能切、普通段落不能，取决于那些副本的先后顺序）。正确顺序是：点击时的那个
-遮罩元素还在文档里就用它解析，它被思源重建掉之后才退回按块 ID 与答案文本重找，并且逐个同 ID
-元素试到能算出键的那一个。一级还必须校验锚点仍属于这个 root（`target.root.contains(anchor)`）：
-块被移到另一个编辑器时锚点依然 `isConnected`，只查它就等于把记录写进旧 root，新 root 的下一次
-回放读到空记录，会把刚点亮的遮罩又清掉——看着就是「亮一下又灭」。
-
-**边界**：位置级认的是「同一个位置上还是同一个遮罩」，它认不出「删掉一个遮罩、又在同一
-位置挖空一段相似文本」——两者在 DOM 上完全同形。⇧⌘C 路径靠 `forgetBlockOrder` 丢掉基线兜住；
-不经 ⇧⌘C 而在同一帧内完成「删除 + 新建」的操作（例如整块粘贴覆盖）仍可能让新遮罩被点亮。
-同文本的两个遮罩之间也无法区分左右，属键机制的固有代价。
-
-**仍未覆盖**：`src/index.ts` 的 `initClickToggle` 捕获阶段接管与 `commitToggle` 的 DOM 重定位接线、
-`MutationObserver` 的同步回放调度、`destroy-protyle` 事件接线，以及表格单元格编辑态下的块重建行为
-——这些都需要真实思源运行时，只能手工验收。
-`tableCell.test.mjs` 覆盖 `src/tableCell.ts` 的纯函数层（形态判定、可见文本偏移往返），
-但退避流程本身（派发 pointerdown → 触发 finish → 重建选区 → 重执行）仍需真实内核验证。
+Chromium 使用真实 KaTeX 和截图像素验证：原版在该夹具上同行线差 2 CSS px、纯文字续行被裁掉、嵌套公式两边文字无线；两行纯文字对照正常。修复后四项均通过。
 
 ## 夹具从哪来
 

@@ -1,10 +1,9 @@
 import { Plugin, showMessage, Setting, getActiveEditor } from 'siyuan';
 import {
-  BLANK_CLASS,
+  BODY_SELECTOR,
   CLUSTER_MATH_CLASS,
   INVISIBLE_TEXT,
   KBD_SELECTOR,
-  LINE_DROP_VAR,
   REVEAL_CLASS,
   UNVEIL_CLASS,
   findClustersInRange,
@@ -12,6 +11,8 @@ import {
   getClusterKey,
   markClusterMath,
   resolveClozeAnchor,
+  resolveClozeBlock,
+  resolveClozeBody,
   resolveElement,
   resolveProtyleRoot,
 } from './cluster';
@@ -19,11 +20,9 @@ import {
   HIDING_CLASS,
   UnveilStore,
   dropUnveilForBlockId,
-  findClusterByKey,
   forgetBlockOrder,
   rememberBlockOrder,
   replayBlockUnveil,
-  replayUnveilInto,
   resetAllUnveil,
   toggleUnveilByKey,
   type ToggleTarget,
@@ -39,6 +38,7 @@ import {
   matchHotkey,
   resolveHotkeyBindings,
 } from './tableCell';
+import { UnderlineLayer } from './underline';
 
 /** 创建/取消挖空的工具栏图标。 */
 const CLOZE_ICON = `<symbol id="iconCloze" viewBox="0 0 32 32">
@@ -75,20 +75,10 @@ export default class ClozePlugin extends Plugin {
   private unveilStore = new UnveilStore();
 
   private selectionHandler?: () => void;
-  private toggleDownHandler?: (e: MouseEvent) => void;
-  private swallowHandler?: (e: MouseEvent) => void;
-  /**
-   * 命中遮罩的这次交互是否还没结束。
-   *
-   * 立起来之后，紧随的 mouseup / click / dblclick 一并吞掉，直到这次交互的 click 到达才复位。
-   * 不用固定时间窗：用户按住不放超过窗口再松开时，mouseup 会漏给思源，它会收到一次没有对应
-   * mousedown 的抬起。
-   *
-   * 只拦 mousedown 是不够的：思源的编辑器还会在 mouseup / click 上更新选区快照、响应行内
-   * 公式，对它来说这次点击仍然「发生过」——点遮罩里的公式照样弹出公式编辑器。
-   * 没命中遮罩的 mousedown 会把它复位，因此不会误吞紧接着的下一次点击。
-   */
-  private swallowing = false;
+  private gestureEvents?: AbortController;
+  private cancelGesture?: () => void;
+  private readonly layers = new Map<HTMLElement, UnderlineLayer>();
+  private readonly destroyedRoots = new WeakSet<HTMLElement>();
   private domObserver?: MutationObserver;
   /** 单元格编辑态下的快捷键兜底监听（捕获阶段）。 */
   private cellShortcutHandler?: (e: KeyboardEvent) => void;
@@ -114,7 +104,7 @@ export default class ClozePlugin extends Plugin {
     this.initDomObserver();
     this.initCellShortcutFallback();
 
-    this.markClusterMathIn(document.body);
+    this.attachEditors(document.body);
     this.updateGlobalStyles();
   }
 
@@ -126,6 +116,11 @@ export default class ClozePlugin extends Plugin {
     this.removeMobileToolbarItem();
     this.removeCellShortcutFallback();
     this.removeDomObserver();
+    this.eventBus.off('loaded-protyle-static', this.protyleLoaded);
+    this.eventBus.off('loaded-protyle-dynamic', this.protyleLoaded);
+    this.eventBus.off('destroy-protyle', this.protyleDestroyed);
+    for (const layer of this.layers.values()) layer.dispose();
+    this.layers.clear();
     this.removeClickToggle();
     this.removeSelectionReveal();
     this.cleanAllClozeArtifacts();
@@ -149,9 +144,13 @@ export default class ClozePlugin extends Plugin {
       langKey: 'toggleCloze',
       langText: String(this.i18n.toggleCloze || '切换完形填空显隐'),
       hotkey: '⌥⇧X',
-      callback: () => {
-        this.toggleGlobalCloze();
-      },
+      callback: () => this.toggleGlobalCloze(),
+    });
+    this.addCommand({
+      langKey: 'toggleClozeAtCaret',
+      langText: String(this.i18n.toggleClozeAtCaret || '切换光标处挖空揭晓'),
+      hotkey: '',
+      callback: () => this.toggleAtCaret(),
     });
   }
 
@@ -345,303 +344,292 @@ export default class ClozePlugin extends Plugin {
       this.collectSelectedClusters(next);
     }
 
-    for (const el of this.revealedElements) {
-      if (!next.has(el)) el.classList.remove(REVEAL_CLASS);
-    }
-    for (const el of next) {
-      if (this.revealedElements.indexOf(el) === -1) el.classList.add(REVEAL_CLASS);
-    }
-
-    this.revealedElements = Array.from(next);
+    const dirty = new Set<HTMLElement>();
+    const change = (el: HTMLElement, reveal: boolean) => {
+      el.classList.toggle(REVEAL_CLASS, reveal);
+      const block = resolveClozeBlock(el);
+      if (block) dirty.add(block);
+    };
+    for (const el of this.revealedElements) if (!next.has(el)) change(el, false);
+    for (const el of next) if (!this.revealedElements.includes(el)) change(el, true);
+    this.revealedElements = [...next];
+    dirty.forEach(block => this.invalidateBlock(block));
   }
 
   private collectSelectedClusters(target: Set<HTMLElement>) {
     const selection = window.getSelection();
-    if (!selection || selection.rangeCount === 0 || selection.isCollapsed) return;
-
+    if (!selection || !selection.rangeCount || selection.isCollapsed) return;
     const range = selection.getRangeAt(0);
-    const root = resolveProtyleRoot(range.startContainer);
-    if (!root) return;
-
-    // 只扫当前编辑器：selectionchange 在拖动选择时每帧都会触发，扫全篇会把
-    // 其它页签、表格单元格里的遮罩一起算进来，手机上尤其容易拖慢。
-    root.querySelectorAll<HTMLElement>(KBD_SELECTOR).forEach((kbd) => {
-      let hit = false;
-      try {
-        hit = range.intersectsNode(kbd);
-      } catch {
-        hit = false;
-      }
-      if (!hit) return;
-
-      getClozeCluster(kbd).forEach((el) => target.add(el));
-    });
+    const body = resolveClozeBody(range.startContainer);
+    if (!body || body !== resolveClozeBody(range.endContainer)) return;
+    for (const cluster of findClustersInRange(range, body)) cluster.forEach(el => target.add(el));
   }
 
   private clearReveal() {
-    for (const el of this.revealedElements) {
-      el.classList.remove(REVEAL_CLASS);
-    }
+    for (const el of this.revealedElements) el.classList.remove(REVEAL_CLASS);
     this.revealedElements = [];
   }
 
-  /* ========================================================================
-     二、点击揭晓（持久态）
-
-     捕获阶段监听：表格单元格编辑器对 mousedown/mouseup/click 一律
-     stopPropagation，冒泡阶段收不到；捕获阶段先于目标处理，能拿到。
-     ======================================================================== */
-
-  /**
-   * 点击揭晓。
-   *
-   * 挂在捕获阶段的 mousedown 上，不是 click。click 只在 mousedown 与 mouseup 落在同一个
-   * 目标上时才派发，而按下抬起之间抖几个像素就足以让目标变成相邻的文本——那次点击既不
-   * 切换、又已经开始了拖选，用户看到的就是「点了没反应，还变成了选择」。mousedown 在拖选
-   * 开始之前一定触发，这条路径根本不存在。
-   *
-   * 命中遮罩时把整次交互吞掉，不只是 mousedown：思源还会在 mouseup / click 上更新选区
-   * 快照、响应行内公式，只拦 mousedown 的话，点遮罩里的公式照样会弹出公式编辑器。
-   * preventDefault 只能拦住浏览器自己的默认行为（选择、聚焦），拦不住思源自己的处理，
-   * 所以那几个事件得一并 stopImmediatePropagation。
-   *
-   * 每次点击都切换，不做双击回滚：mousedown 上的 preventDefault 已经让「双击选词」不可能
-   * 发生，那个回滚分支只会让手快的人点两下等于没点。
-   */
-  private initClickToggle() {
-    this.toggleDownHandler = (e: MouseEvent) => {
-      if (!this.isClozeActive) return;
-      if (e.button !== 0) return;
-
-      const target = this.resolveToggleTarget(e.target as Node | null);
-      if (!target) {
-        // 没点中遮罩：这次交互不归我们管，紧随的 mouseup / click 也放行。
-        this.swallowing = false;
-        return;
-      }
-
-      this.swallowing = true;
-
-      e.preventDefault();
-      e.stopImmediatePropagation();
-
-      // 每次点击都切换，不看 e.detail 的点击计数：连点两下就是切换两次。原本有个
-      // 「第二下撤回」的分支，为的是保住双击选词；但 mousedown 上的 preventDefault
-      // 早把选词一起拦掉了，那个分支已经没有存在意义，留着只会让手快的人点两下等于没点。
-      this.commitToggle(target);
-    };
-
-    this.swallowHandler = (e: MouseEvent) => {
-      if (!this.swallowing) return;
-      // mouseup 只吞不复位：这次交互的 click 紧随其后，标记留到那时再清。
-      if (e.type !== 'mouseup') this.swallowing = false;
-      e.preventDefault();
-      e.stopImmediatePropagation();
-    };
-
-    document.addEventListener('mousedown', this.toggleDownHandler, true);
-    document.addEventListener('mouseup', this.swallowHandler, true);
-    document.addEventListener('click', this.swallowHandler, true);
-    document.addEventListener('dblclick', this.swallowHandler, true);
-  }
-
-  /** 把命中的簇解析成可跨重建定位的目标：只留根元素、块 ID 与标识。 */
   private resolveToggleTarget(node: Node | null): ToggleTarget | null {
     const anchor = resolveClozeAnchor(node);
-    // 编辑器之外（其它插件界面、导出预览）的 kbd 不是遮罩，不参与切换。
-    if (!anchor || !anchor.closest('.protyle-wysiwyg')) return null;
-
-    const block = anchor.closest('[data-node-id]');
+    if (!anchor || !resolveClozeBody(anchor)) return null;
+    const block = resolveClozeBlock(anchor);
     const root = resolveProtyleRoot(anchor);
     const nodeId = block?.getAttribute('data-node-id');
     if (!block || !root || !nodeId) return null;
-
     const key = getClusterKey(block, getClozeCluster(anchor));
     return key ? { root, nodeId, key, anchor } : null;
   }
 
-  /**
-   * 真正执行切换。
-   *
-   * 不按块 ID 在根里 querySelector：同一个块 ID 在 protyle 根里可能同时存在多个元素
-   * （实测 3 个），第一个未必是含遮罩的那份，会算出一个空簇，这次点击被静默丢掉——表现
-   * 正是「点了没反应」。列表项与普通段落踩不踩得到这个坑，取决于那些副本的先后顺序。
-   *
-   * 顺序：点击时的那个遮罩元素若还在文档里，用它解析最可信；它被思源重建掉之后，才退回
-   * 按块 ID 与答案文本在当前 DOM 里重找，并且逐个同 ID 元素试。
-   */
-  private commitToggle(target: ToggleTarget) {
-    if (!this.isClozeActive) return;
-    if (!target.root.isConnected) return;
-
-    // 一级：点击时的锚点还在文档里、且仍属于这个 root，用它解析最可信。
-    // 归属校验不能省：块被移到另一个编辑器时锚点依然 isConnected，只用它会让记录写进旧 root，
-    // 新 root 的下一次回放读到空记录，把刚点亮的遮罩又清掉——看着就是「亮一下又灭」。
-    if (target.anchor.isConnected && target.root.contains(target.anchor)) {
-      const block = target.anchor.closest('[data-node-id]');
-      const cluster = getClozeCluster(target.anchor);
-      const key = block ? getClusterKey(block, cluster) : null;
-      if (block && key) {
-        this.applyToggle(target.root, block, key, cluster);
-        return;
-      }
-    }
-
-    const candidates = Array.from(
-      target.root.querySelectorAll(`[data-node-id="${target.nodeId}"]`),
-    );
-    for (const block of candidates) {
-      const cluster = findClusterByKey(block, target.key);
-      if (cluster) {
-        this.applyToggle(target.root, block, target.key, cluster);
-        return;
-      }
-    }
+  private toggleTarget(target: ToggleTarget) {
+    const block = resolveClozeBlock(target.anchor);
+    if (!this.isClozeActive || !block || !target.anchor.isConnected || resolveProtyleRoot(target.anchor) !== target.root) return false;
+    const cluster = getClozeCluster(target.anchor);
+    const key = getClusterKey(block, cluster);
+    if (!key) return false;
+    toggleUnveilByKey(this.unveilStore.ensure(target.root), key, cluster);
+    rememberBlockOrder(this.unveilStore, block);
+    this.refreshBlockCopies(block, target.root);
+    return true;
   }
 
-  private applyToggle(root: HTMLElement, block: Element, key: string, cluster: HTMLElement[]) {
-    toggleUnveilByKey(this.unveilStore.ensure(root), key, cluster);
-    // 记下这一刻的簇顺序：用户可能紧接着就在簇内改字，那时还没有任何 DOM 变更触发过
-    // 回放，位置对齐要靠这份顺序才认得出「还是同一个遮罩」。
-    rememberBlockOrder(this.unveilStore, block);
+  private toggleAtCaret() {
+    const editor = getActiveEditor();
+    const protyle = (editor as any)?.protyle ?? (window as any)?.siyuan?.mobile?.editor?.protyle;
+    const range = this.resolveActionRange(protyle);
+    if (!range?.collapsed) return;
+    const target = this.resolveToggleTarget(this.caretAnchor(range));
+    if (target) this.toggleTarget(target);
+  }
+
+  private initClickToggle() {
+    this.gestureEvents = new AbortController();
+    const signal = this.gestureEvents.signal;
+    const capture = { capture: true, passive: false, signal };
+    const owned = new Set<number>();
+    let tap: { target: ToggleTarget; id: number; x: number; y: number; at: number } | undefined;
+    let released: { id: number; x: number; y: number; at: number } | undefined;
+    const reset = () => { owned.clear(); tap = undefined; released = undefined; };
+    this.cancelGesture = reset;
+
+    const anchorAt = (node: EventTarget | null) => this.isClozeActive && node instanceof Node && resolveClozeBody(node)
+      ? resolveClozeAnchor(node) : null;
+    const stop = (event: Event) => event.stopImmediatePropagation();
+    const consume = (event: Event) => { event.preventDefault(); stop(event); };
+    const distance = (a: { x: number; y: number }, b: MouseEvent) => Math.hypot(a.x - b.clientX, a.y - b.clientY);
+
+    // 在 window 捕获阶段接管命中挖空的按下；切换仍等到同簇轻点抬起。
+    window.addEventListener('pointerdown', e => {
+      released = undefined;
+      if (!e.isPrimary) tap = undefined;
+      const anchor = anchorAt(e.target);
+      if (!anchor) return;
+      owned.add(e.pointerId);
+      consume(e);
+      if (e.isPrimary && e.button === 0 && !e.shiftKey && !e.altKey && !e.ctrlKey && !e.metaKey) {
+        const target = this.resolveToggleTarget(anchor);
+        if (target) tap = { target, id: e.pointerId, x: e.clientX, y: e.clientY, at: e.timeStamp };
+      }
+    }, capture);
+    window.addEventListener('pointermove', e => {
+      if (!owned.has(e.pointerId)) {
+        if (e.buttons === 0 && anchorAt(e.target)) stop(e);
+        return;
+      }
+      if (tap?.id === e.pointerId && distance(tap, e) > 7) tap = undefined;
+      stop(e);
+    }, capture);
+    window.addEventListener('pointerup', e => {
+      if (!owned.delete(e.pointerId)) {
+        if (anchorAt(e.target)) consume(e);
+        return;
+      }
+      consume(e);
+      released = { id: e.pointerId, x: e.clientX, y: e.clientY, at: e.timeStamp };
+      const start = tap?.id === e.pointerId ? tap : undefined;
+      if (!start) return;
+      tap = undefined;
+      if (e.button !== 0 || e.timeStamp - start.at > 430 || distance(start, e) > 7) return;
+      // 触摸会隐式捕获指针，抬起时用实际落点，而不是被捕获的事件目标。
+      const end = this.resolveToggleTarget(document.elementFromPoint(e.clientX, e.clientY));
+      if (end && end.root === start.target.root && end.key === start.target.key) this.toggleTarget(end);
+    }, capture);
+    window.addEventListener('pointercancel', e => {
+      if (tap?.id === e.pointerId) tap = undefined;
+      if (owned.delete(e.pointerId)) stop(e);
+    }, capture);
+
+    // click 不受 pointerdown.preventDefault() 保证；原生点击处理不能依赖揭晓是否成功。
+    const swallowMouse = (e: MouseEvent) => {
+      if (anchorAt(e.target)) { consume(e); return; }
+      if (released && e.detail > 0 && e.timeStamp - released.at < 650 && distance(released, e) <= 8 &&
+          (!('pointerId' in e) || e.pointerId === released.id || e.pointerId === 0)) consume(e);
+    };
+    for (const type of ['mousedown', 'mouseup', 'click', 'dblclick', 'auxclick'] as const) {
+      window.addEventListener(type, swallowMouse, capture);
+    }
+    for (const type of ['pointerover', 'pointerenter', 'mouseover', 'mouseenter', 'mousemove'] as const) {
+      window.addEventListener(type, e => {
+        if (e.buttons === 0 && anchorAt(e.target)) stop(e);
+      }, capture);
+    }
+    const cancelAction = (e: Event) => {
+      if (!owned.size && !anchorAt(e.target)) return;
+      tap = undefined;
+      consume(e);
+    };
+    window.addEventListener('contextmenu', cancelAction, capture);
+    window.addEventListener('dragstart', cancelAction, capture);
+    window.addEventListener('selectstart', cancelAction, capture);
+
+    // 拦截旧触摸监听及补发点击，保留浏览器原生的滑动滚动和缩放。
+    for (const type of ['touchstart', 'touchmove', 'touchend', 'touchcancel'] as const) {
+      window.addEventListener(type, e => {
+        if (!Array.from(e.changedTouches).some(touch => anchorAt(touch.target))) return;
+        if (type === 'touchend') consume(e);
+        else stop(e);
+      }, capture);
+    }
+    window.addEventListener('scroll', () => { tap = undefined; }, { capture: true, passive: true, signal });
+    window.addEventListener('blur', reset, { signal });
   }
 
   private removeClickToggle() {
-    // 监听摘掉之后这个标记留着没有意义，顺手复位。
-    this.swallowing = false;
-    if (this.toggleDownHandler) {
-      document.removeEventListener('mousedown', this.toggleDownHandler, true);
-      this.toggleDownHandler = undefined;
-    }
-    if (this.swallowHandler) {
-      document.removeEventListener('mouseup', this.swallowHandler, true);
-      document.removeEventListener('click', this.swallowHandler, true);
-      document.removeEventListener('dblclick', this.swallowHandler, true);
-      this.swallowHandler = undefined;
+    this.cancelGesture?.();
+    this.cancelGesture = undefined;
+    this.gestureEvents?.abort();
+    this.gestureEvents = undefined;
+  }
+
+  private attachEditors(scope: Element) {
+    const bodies = Array.from(scope.querySelectorAll<HTMLElement>(BODY_SELECTOR));
+    if (scope.matches(BODY_SELECTOR)) bodies.unshift(scope as HTMLElement);
+    for (const body of bodies) {
+      const root = resolveProtyleRoot(body);
+      if (!root || this.destroyedRoots.has(root) || !body.isConnected || resolveClozeBody(body) !== body || this.layers.has(body)) continue;
+      this.layers.set(body, new UnderlineLayer(body, () => this.isClozeActive));
+      const blocks = new Set<HTMLElement>();
+      body.querySelectorAll<HTMLElement>(KBD_SELECTOR).forEach(kbd => {
+        const block = resolveClozeBlock(kbd);
+        if (block && resolveClozeBody(kbd) === body) blocks.add(block);
+      });
+      blocks.forEach(block => this.refreshBlock(block));
     }
   }
 
-  /* ========================================================================
-     三、揭晓态保活
+  private invalidateBlock(block: HTMLElement) {
+    const body = resolveClozeBody(block);
+    if (!body) return;
+    const hasCloze = [...block.querySelectorAll(KBD_SELECTOR)].some(kbd => resolveClozeBlock(kbd) === block && resolveClozeBody(kbd) === body);
+    this.layers.get(body)?.track(block, hasCloze);
+  }
 
-     揭晓写在 DOM 的 class 上，而思源会因编辑事务、页签切换重建块 DOM。
-     观察 childList 变化、对受影响的块就地回放，揭晓因此不丢。
-     只观察 childList：class 改动属 attributes，不会被自身回放再次触发。
+  private refreshBlock(block: HTMLElement) {
+    const body = resolveClozeBody(block);
+    if (!body || !this.layers.has(body)) return;
+    markClusterMath(block);
+    replayBlockUnveil(this.unveilStore, block);
+    this.invalidateBlock(block);
+  }
 
-     回放同步执行，不用定时器合并：思源重建块时新的 kbd 元素不带揭晓类，
-     而 MutationObserver 的回调跑在微任务里、早于浏览器绘制——同步补类，用户看不到
-     中间态。改成 setTimeout 会把落差推到下一帧之后，表现正是「每输入一个字，
-     揭晓态闪一下」。
-
-     只处理本次变更涉及的块，不扫全篇：文档里绝大多数块都没有揭晓记录，
-     单块回放在记录为空时一次 closest 就早退。
-     ======================================================================== */
+  private refreshBlockCopies(block: HTMLElement, root: HTMLElement) {
+    this.invalidateBlock(block);
+    const id = block.getAttribute('data-node-id');
+    if (!id) return;
+    for (const copy of root.querySelectorAll<HTMLElement>(      "[data-node-id=\"" + CSS.escape(id) + "\"]:not(span)")) {
+      if (copy !== block && resolveProtyleRoot(copy) === root) this.refreshBlock(copy);
+    }
+  }
 
   private initDomObserver() {
-    this.domObserver = new MutationObserver((records) => {
-      const blocks = new Set<Element>();
-
-      records.forEach((record) => {
-        const target = record.target.nodeType === Node.ELEMENT_NODE
-          ? (record.target as HTMLElement)
-          : record.target.parentElement;
-
-        // 正文容器之外的变化与本插件无关：其它插件的界面里也会出现带 data-node-id 的元素
-        // 与 kbd，打标和回放都不该落进去。新建编辑器由 loaded-protyle-static / dynamic 负责。
-        const editor = target?.closest('.protyle-wysiwyg, .b3-typography');
-        if (!editor) return;
-
-        const host = target?.closest('[data-node-id]') || editor;
-        if (host) blocks.add(host);
-
-        // 块被整体替换时，新块挂在父容器的 addedNodes 上，record.target 并不是它。
-        record.addedNodes.forEach((node) => {
-          if (node.nodeType !== Node.ELEMENT_NODE) return;
-          const el = node as Element;
-          if (!editor.contains(el)) return;
-          if (el.matches('[data-node-id]')) blocks.add(el);
-          el.querySelectorAll('[data-node-id]').forEach((child) => blocks.add(child));
-        });
-      });
-
-      blocks.forEach((block) => {
-        // 先打标再回放：簇内公式的成员类与下划线偏移要跟着这次变更后的 DOM 走。
-        markClusterMath(block);
-        if (block.closest('.protyle-wysiwyg')) {
-          replayBlockUnveil(this.unveilStore, block);
+    const withoutPlugin = (value: string | null) => (value || '').split(/\s+/).filter(c => c && !c.startsWith('sy-cloze-')).join(' ');
+    this.domObserver = new MutationObserver(records => {
+      const blocks = new Set<HTMLElement>();
+      let prune = false;
+      for (const record of records) {
+        const target = resolveElement(record.target);
+        if (!target || target.closest('.cloze-underlines')) continue;
+        if (record.type === 'attributes' && record.attributeName === 'class' &&
+            withoutPlugin(record.oldValue) === withoutPlugin(target.getAttribute('class'))) continue;
+        const body = resolveClozeBody(target);
+        const block = resolveClozeBlock(target);
+        if (body && block && body.contains(block)) blocks.add(block);
+        if (record.type === 'attributes' && (record.attributeName === 'style' || record.attributeName === 'class' || record.attributeName === 'data-type')) {
+          if (body && !block) this.layers.get(body)?.invalidate();
+          if (!block) for (const layer of this.layers.values()) if (target.contains(layer.body)) layer.invalidate();
+          if (record.attributeName !== 'style' && !block && !body) prune = true;
         }
-      });
+        for (const node of record.addedNodes) {
+          if (!(node instanceof HTMLElement)) continue;
+          this.attachEditors(node);
+          if (node.matches('[data-node-id]:not(span)') && resolveClozeBody(node)) blocks.add(node);
+          if (!node.closest('span')) node.querySelectorAll<HTMLElement>(KBD_SELECTOR).forEach(kbd => {
+            const owner = resolveClozeBlock(kbd);
+            if (owner && resolveClozeBody(kbd)) blocks.add(owner);
+          });
+        }
+        if (record.removedNodes.length) prune = true;
+        if (body && !block && record.type === 'childList' && [...record.addedNodes, ...record.removedNodes].some(node => !(node instanceof Element) || !node.matches('.cloze-underlines'))) this.layers.get(body)?.invalidate();
+      }
+      if (prune) for (const [body, layer] of this.layers) {
+        if (!body.isConnected || resolveClozeBody(body) !== body) {
+          const root = resolveProtyleRoot(body);
+          if (root && !root.isConnected) this.unveilStore.drop(root);
+          layer.dispose();
+          this.layers.delete(body);
+        } else layer.prune();
+      }
+      blocks.forEach(block => { if (block.isConnected) this.refreshBlock(block); });
+      if (blocks.size) this.scheduleRevealUpdate();
     });
-
-    this.domObserver.observe(document.body, {
-      childList: true,
-      subtree: true,
-      attributes: true,
-      attributeFilter: ['data-render', 'data-content', 'data-type'],
-    });
+    this.domObserver.observe(document.body, { childList: true, subtree: true, characterData: true,
+      attributes: true, attributeOldValue: true, attributeFilter: ['class', 'style', 'data-render', 'data-content', 'data-type'] });
   }
 
   private removeDomObserver() {
-    if (this.domObserver) {
-      this.domObserver.disconnect();
-      this.domObserver = undefined;
-    }
+    this.domObserver?.disconnect();
+    this.domObserver = undefined;
   }
-
-  /* ========================================================================
-     四、事件总线
-     ======================================================================== */
 
   private initEventBus() {
-    // 静态阶段先挂上遮蔽开关，并补一次回放：只读/预览等路径只走静态渲染，
-    // 不会有 dynamic 事件。常规路径此时通常还没渲染出 kbd，回放会立刻早退。
-    this.eventBus.on('loaded-protyle-static', (event) => {
-      this.handleProtyleStatic(event.detail.protyle.element);
-    });
-
-    // 动态就绪阶段再回放一次：页签切回、文档重载都走这里。
-    this.eventBus.on('loaded-protyle-dynamic', (event) => {
-      this.handleProtyleDynamic(event.detail.protyle.element);
-    });
-
-    // 文档关闭：显式注销该 protyle 的记录。
-    // 「关闭文档恢复默认遮蔽」由此成为一条确定的事件，而不是「元素会被 GC」的运气。
-    // detail 结构按类型包声明读取，但这里做防御：该包是社区维护的，若与内核实际
-    // 结构不符，抛错会让清理静默失效——正是这条监听要消灭的那种失效。
-    this.eventBus.on('destroy-protyle', (event) => {
-      const element = (event as any)?.detail?.protyle?.element;
-      if (element) this.unveilStore.drop(element);
-    });
+    this.eventBus.on('loaded-protyle-static', this.protyleLoaded);
+    this.eventBus.on('loaded-protyle-dynamic', this.protyleLoaded);
+    this.eventBus.on('destroy-protyle', this.protyleDestroyed);
   }
 
-  private handleProtyleStatic(containerEl: HTMLElement) {
-    if (!containerEl.querySelector('.protyle-wysiwyg')) return;
-
-    this.markClusterMathIn(containerEl);
-    replayUnveilInto(this.unveilStore, containerEl);
-  }
-
-  private handleProtyleDynamic(containerEl: HTMLElement) {
-    if (!containerEl.querySelector('.protyle-wysiwyg')) return;
-
-    this.markClusterMathIn(containerEl);
-    replayUnveilInto(this.unveilStore, containerEl);
+  private protyleLoaded = (event: CustomEvent) => {
+    const root: HTMLElement | undefined = event.detail?.protyle?.element;
+    if (!root) return;
+    this.destroyedRoots.delete(root);
+    this.attachEditors(root);
+    for (const [body, layer] of this.layers) if (root.contains(body)) layer.invalidate();
     this.scheduleRevealUpdate();
-  }
+  };
 
-  /**
-   * 给整篇里所有含遮罩的块打公式成员标记。
-   *
-   * 只从 kbd 反查所属块，不遍历全部块：文档里绝大多数块没有遮罩，逐块 querySelectorAll
-   * 是白花的开销。同一个块里的多个 kbd 会被多次查到，用 Set 去重。
-   */
-  private markClusterMathIn(containerEl: HTMLElement) {
-    const blocks = new Set<Element>();
-    containerEl.querySelectorAll<HTMLElement>(KBD_SELECTOR).forEach((kbd) => {
-      const block = kbd.closest('[data-node-id]');
-      if (block) blocks.add(block);
-    });
-    blocks.forEach((block) => markClusterMath(block));
+  private protyleDestroyed = (event: CustomEvent) => {
+    const root: HTMLElement | undefined = event.detail?.protyle?.element;
+    if (!root) return;
+    this.destroyedRoots.add(root);
+    this.unveilStore.drop(root);
+    for (const [body, layer] of this.layers) if (root === body || root.contains(body)) {
+      const owner = resolveProtyleRoot(body);
+      if (owner) { this.destroyedRoots.add(owner); this.unveilStore.drop(owner); }
+      layer.dispose();
+      this.layers.delete(body);
+    }
+    this.scheduleRevealUpdate();
+  };
+
+  private caretAnchor(range: Range): HTMLElement | null {
+    const node = range.startContainer;
+    const direct = resolveClozeAnchor(node);
+    if (direct) return direct;
+    if (node.nodeType === Node.TEXT_NODE && INVISIBLE_TEXT.test(node.textContent || '')) {
+      for (const sibling of [node.previousSibling, node.nextSibling]) {
+        if (sibling instanceof HTMLElement && sibling.matches(KBD_SELECTOR)) return resolveClozeAnchor(sibling);
+      }
+    }
+    return null;
   }
 
   /* ========================================================================
@@ -764,6 +752,8 @@ export default class ClozePlugin extends Plugin {
       return;
     }
 
+    if (!resolveClozeBody(range.startContainer) || resolveClozeBody(range.startContainer) !== resolveClozeBody(range.endContainer)) return;
+
     // 表格单元格编辑态：td 已被 openTableCellRichEditor 整体换成独立 ProtyleLite，
     // 单元格内的块是**没有持久 ID 的临时块**。此时若继续走外层 protyle 的事务，
     // 内核会以 block not found 拒绝并回滚——前端 DOM 看着像加上了 kbd，数据却不落库。
@@ -781,8 +771,8 @@ export default class ClozePlugin extends Plugin {
     let startNode = resolveElement(range.startContainer);
     let endNode = resolveElement(range.endContainer);
 
-    let startBlock: Element | null = startNode?.closest('[data-node-id]') || null;
-    let endBlock: Element | null = endNode?.closest('[data-node-id]') || null;
+    let startBlock: HTMLElement | null = resolveClozeBlock(startNode);
+    let endBlock: HTMLElement | null = resolveClozeBlock(endNode);
 
     if (!startBlock || !endBlock) {
       showMessage(String(this.i18n.notInParagraph || '请将光标置于正文段落内'), 2000, 'info');
@@ -805,8 +795,8 @@ export default class ClozePlugin extends Plugin {
 
       startNode = resolveElement(range.startContainer);
       endNode = resolveElement(range.endContainer);
-      startBlock = startNode?.closest('[data-node-id]') || null;
-      endBlock = endNode?.closest('[data-node-id]') || null;
+      startBlock = resolveClozeBlock(startNode);
+      endBlock = resolveClozeBlock(endNode);
 
       if (!startBlock || !endBlock || startBlock !== endBlock) {
         showMessage(String(this.i18n.crossBlock || '行内挖空不能跨段落，请在同一段落内选择'), 2000, 'info');
@@ -818,27 +808,7 @@ export default class ClozePlugin extends Plugin {
 
     // 检查光标折叠情况（单点光标落入）
     if (range.collapsed) {
-      let targetKbd = startNode?.closest<HTMLElement>(KBD_SELECTOR) || null;
-
-      if (!targetKbd) {
-        // 光标可能落在被挖空夹住的行内公式内部
-        targetKbd = resolveClozeAnchor(range.startContainer);
-      }
-
-      if (!targetKbd) {
-        // 光标可能停在 kbd 前后的零宽边界文本节点上，按紧邻的挖空块归属
-        const caretNode = range.startContainer;
-        if (caretNode.nodeType === Node.TEXT_NODE && INVISIBLE_TEXT.test(caretNode.textContent || '')) {
-          const prev = caretNode.previousSibling;
-          const next = caretNode.nextSibling;
-          if (prev && prev.nodeType === Node.ELEMENT_NODE && (prev as HTMLElement).matches(KBD_SELECTOR)) {
-            targetKbd = prev as HTMLElement;
-          } else if (next && next.nodeType === Node.ELEMENT_NODE && (next as HTMLElement).matches(KBD_SELECTOR)) {
-            targetKbd = next as HTMLElement;
-          }
-        }
-      }
-
+      const targetKbd = this.caretAnchor(range);
       if (!targetKbd) {
         showMessage(String(this.i18n.noSelection || '请先选中文本或将光标置于挖空块内'), 2000, 'info');
         return;
@@ -904,7 +874,7 @@ export default class ClozePlugin extends Plugin {
         }
 
         if (startBlock.isConnected) {
-          markClusterMath(startBlock);
+          this.invalidateBlock(startBlock);
         }
         this.scheduleRevealUpdate();
 
@@ -956,20 +926,21 @@ export default class ClozePlugin extends Plugin {
      ======================================================================== */
 
   private toggleGlobalCloze() {
-    // 关遮蔽之后 toggleDownHandler 会早退、不再复位吞事件标记，这里主动清一次：否则
-    // 「命中遮罩后 click 丢失（拖选、鼠标移出窗口）→ 关遮蔽」之后，关遮蔽后的第一次
-    // 点击的 mouseup / click 会被吞掉，看着像点了没反应。
-    this.swallowing = false;
-    resetAllUnveil(this.unveilStore, document);
-
-    this.isClozeActive = !this.isClozeActive;
-    this.updateTopBarState();
-    this.updateGlobalStyles();
+    this.setClozeActive(!this.isClozeActive);
 
     const msg = this.isClozeActive
       ? String(this.i18n.clozeActive || '完形填空模式已开启')
       : String(this.i18n.clozeInactive || '完形填空模式已关闭');
     showMessage(msg, 2000, 'info');
+  }
+
+  private setClozeActive(active: boolean) {
+    if (this.isClozeActive === active) return;
+    this.cancelGesture?.();
+    resetAllUnveil(this.unveilStore, document);
+    this.isClozeActive = active;
+    this.updateTopBarState();
+    this.updateGlobalStyles();
   }
 
   private updateTopBarState() {
@@ -993,6 +964,7 @@ export default class ClozePlugin extends Plugin {
     // 遮蔽只由 body 上的开关向下生效，作用域在样式表里收进 .protyle-wysiwyg：
     // 分栏、单元格编辑器这类后建的编辑器无需补类。
     document.body.classList.toggle('sy-cloze-active', this.isClozeActive);
+    for (const layer of this.layers.values()) layer.invalidate();
 
     if (!this.isClozeActive) {
       this.clearReveal();
@@ -1008,10 +980,7 @@ export default class ClozePlugin extends Plugin {
     document.querySelectorAll<HTMLElement>(`.${UNVEIL_CLASS}, .${HIDING_CLASS}`).forEach((el) => {
       el.classList.remove(UNVEIL_CLASS, HIDING_CLASS);
     });
-    document.querySelectorAll<HTMLElement>(`.${CLUSTER_MATH_CLASS}, .${BLANK_CLASS}, ${KBD_SELECTOR}`).forEach((el) => {
-      el.classList.remove(CLUSTER_MATH_CLASS, BLANK_CLASS);
-      el.style.removeProperty(LINE_DROP_VAR);
-    });
+    document.querySelectorAll('.' + CLUSTER_MATH_CLASS).forEach(el => el.classList.remove(CLUSTER_MATH_CLASS));
 
     this.clearReveal();
   }
@@ -1021,34 +990,38 @@ export default class ClozePlugin extends Plugin {
      ======================================================================== */
 
   private initSettingsPanel() {
+    let draft: HTMLInputElement | undefined;
+    let pending: Promise<void> = Promise.resolve();
     this.setting = new Setting({
-      confirmCallback: async () => {
-        const next = this.settings.defaultHide;
-        const changed = next !== this.isClozeActive;
-        await this.savePluginSettings();
-
-        // 「默认隐藏」同时作为当前开关的即时动作：用户改完设置就能看到效果，
-        // 不必重载插件。只有真的翻转了状态才清揭晓记录，避免普通保存把阅读进度抹掉。
-        if (changed) {
-          resetAllUnveil(this.unveilStore, document);
-          this.isClozeActive = next;
-          this.updateTopBarState();
-          this.updateGlobalStyles();
-        }
+      confirmCallback: () => {
+        const next = draft?.checked;
+        if (next === undefined) return;
+        pending = pending.then(async () => {
+          if (next === this.settings.defaultHide) return;
+          const settings = { ...this.settings, defaultHide: next };
+          try {
+            const result = await this.saveData(STORAGE_NAME, settings) as { code?: number } | undefined;
+            if (result?.code) throw new Error(`saveData: ${result.code}`);
+            this.settings = settings;
+            this.setClozeActive(next);
+          } catch {
+            showMessage(String(this.i18n.settingsSaveFailed || '未能保存挖空设置'), 3000, 'error');
+          }
+        });
+        return pending;
       },
     });
-
-    const defaultHideCheckbox = document.createElement('input');
-    defaultHideCheckbox.type = 'checkbox';
-    defaultHideCheckbox.className = 'b3-switch fn__flex-center';
-    defaultHideCheckbox.checked = this.settings.defaultHide;
-    defaultHideCheckbox.addEventListener('change', () => {
-      this.settings.defaultHide = defaultHideCheckbox.checked;
-    });
     this.setting.addItem({
-      title: String(this.i18n.defaultHide || '默认隐藏填空'),
-      description: String(this.i18n.defaultHideDesc || '打开文档时默认遮挡所有行内挖空块'),
-      actionElement: defaultHideCheckbox,
+      title: String(this.i18n.defaultHide || '启动时遮蔽挖空'),
+      description: String(this.i18n.defaultHideDesc || '插件启动时采用此模式。更改并保存后，也会应用到当前会话。'),
+      createActionElement: () => {
+        const input = document.createElement('input');
+        input.type = 'checkbox';
+        input.className = 'b3-switch fn__flex-center';
+        input.checked = this.settings.defaultHide;
+        draft = input;
+        return input;
+      },
     });
   }
 
@@ -1056,14 +1029,10 @@ export default class ClozePlugin extends Plugin {
     try {
       const data = await this.loadData(STORAGE_NAME);
       if (data && typeof data === 'object') {
-        this.settings = { ...DEFAULT_SETTINGS, ...data };
+        this.settings = { ...data, defaultHide: typeof data.defaultHide === 'boolean' ? data.defaultHide : DEFAULT_SETTINGS.defaultHide };
       }
     } catch {
       this.settings = { ...DEFAULT_SETTINGS };
     }
-  }
-
-  private async savePluginSettings() {
-    await this.saveData(STORAGE_NAME, this.settings);
   }
 }

@@ -6,8 +6,8 @@
   "clozeCreated": "已创建行内挖空块",
   "clozeRemoved": "已取消整块行内挖空遮罩",
   "noSelection": "请先选中文本或将光标置于挖空块内",
-  "defaultHide": "默认隐藏填空",
-  "defaultHideDesc": "打开文档时默认遮挡所有行内挖空块；修改后立即生效",
+  "defaultHide": "启动时遮蔽挖空",
+  "defaultHideDesc": "插件启动时采用此模式。更改并保存后，也会应用到当前会话。",
   "cellSelectionNotFound": "未能在单元格内定位选区，请重新选择",
   "cellInvalid": "单元格已失效，请重新选择",
   "cellRich": "该单元格内容较复杂，请退出单元格编辑后再试",
@@ -17,5 +17,7 @@
   "crossBlock": "行内挖空不能跨段落，请在同一段落内选择",
   "notInEditor": "未找到活动编辑器，请确保光标在笔记中",
   "createFailed": "创建未生效，请重试或把光标置于段落内",
-  "removeFailed": "取消未生效，请把光标放进挖空块再试一次"
+  "removeFailed": "取消未生效，请把光标放进挖空块再试一次",
+  "toggleClozeAtCaret": "切换光标处挖空揭晓",
+  "settingsSaveFailed": "未能保存挖空设置"
 }

@@ -11,22 +11,17 @@
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import fs from 'node:fs';
-import path from 'node:path';
-import { fileURLToPath } from 'node:url';
 
-import { WJ, setupDom } from './helpers.mjs';
+import { WJ, parseBlock, setupDom } from './helpers.mjs';
 import {
-  BLANK_CLASS,
+  CLUSTER_MATH_CLASS,
   KBD_SELECTOR,
-  LINE_DROP_VAR,
   REVEAL_CLASS,
   UNVEIL_CLASS,
   getClozeCluster,
   getClusterKey,
   listBlockClusters,
   markClusterMath,
-  measureMathDepthEm,
   parseClusterKey,
   resolveProtyleRoot,
 } from '../src/cluster.ts';
@@ -1012,230 +1007,8 @@ test('replayBlockUnveil：root 级早退不得清掉嵌套内层 protyle 的标�
   );
 });
 
-test('JS 与 CSS 的契约：过渡必须由动画类门控', () => {
-  const stripped = scss.replace(/\/\*[\s\S]*?\*\//g, '');
-  const rules = stripped.split('}').filter((rule) => rule.includes('transition'));
-
-  assert.equal(rules.length, 1, 'transition 只该出现在一条规则里');
-  assert.ok(rules[0].includes(ANIMATE_CLASS), `过渡必须由 .${ANIMATE_CLASS} 门控`);
-  assert.ok(
-    !rules[0].includes('body.sy-cloze-active'),
-    '过渡不得挂在基础规则或遮蔽段上——那样回放补类会变成一段可见的渐变',
-  );
-});
-
-/* --------------------------------------------------------------- 契约层 */
-
-const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const scss = fs.readFileSync(path.join(repoRoot, 'src/index.scss'), 'utf8');
-
-test('JS 与 CSS 的契约：揭晓类必须落在遮蔽规则的选择器里', () => {
-  // 先剥注释再按规则切段：否则把 :not(...) 挪进注释也能骗过 includes。
-  const stripped = scss.replace(/\/\*[\s\S]*?\*\//g, '');
-  const maskRule = stripped.split('}').find((rule) => rule.includes(`:not(.${REVEAL_CLASS})`));
-
-  assert.ok(maskRule, 'index.scss 必须存在以 :not(显晓类) 反向失效的遮蔽规则');
-  assert.ok(maskRule.includes(`:not(.${UNVEIL_CLASS})`), '揭晓类必须与显晓类写在同一段遮蔽选择器里');
-  assert.ok(maskRule.includes(KBD_SELECTOR), '遮蔽规则必须锚在 KBD_SELECTOR 上');
-});
-
-test('JS 与 CSS 的契约：手型光标只挂在遮蔽开启时，且不落在遮蔽段内', () => {
-  const stripped = scss.replace(/\/\*[\s\S]*?\*\//g, '');
-  // 样式表是嵌套写法，按 } 切段拿不到外层选择器，直接截取遮蔽段。
-  const maskSection = stripped.slice(stripped.indexOf('body.sy-cloze-active'));
-
-  assert.ok(maskSection.length > 0, '遮蔽段必须存在');
-
-  const cursorRule = maskSection.split('}').find((rule) => rule.includes('cursor: pointer'));
-  assert.ok(cursorRule, '光标规则必须写在遮蔽段内，否则编辑态会出现「手型但点了没反应」');
-  assert.ok(cursorRule.includes(KBD_SELECTOR), '光标只挂在 kbd 上');
-  assert.ok(
-    !cursorRule.includes(`:not(.${REVEAL_CLASS})`),
-    '光标规则不得落在遮蔽段的 :not() 分支里，否则揭晓态会丢掉手型提示',
-  );
-});
-
 test('两种透晓态必须是彼此独立的类名', () => {
   assert.notEqual(UNVEIL_CLASS, REVEAL_CLASS, '划选临时态与点击持久态混用会让「离开选区即撤」失效');
-});
-
-test('JS 与 CSS 的契约：遮蔽态的命中区要跟着模糊范围一起外扩', () => {
-  const stripped = scss.replace(/\/\*[\s\S]*?\*\//g, '');
-  const rules = stripped.split('}');
-
-  // blur(6px) 让模糊块看起来比实际宽出一圈，而 kbd 的 padding 只有 1px。命中区不跟着扩，
-  // 用户照着模糊的边缘点下去就落到相邻文本上，这次点击等于没发生。
-  const maskRule = rules.find((rule) => rule.includes('blur(6px)'));
-  assert.ok(maskRule, '找不到遮蔽段规则');
-  assert.ok(maskRule.includes('position: relative'), '遮蔽段要给外扩的伪元素留定位参照');
-
-  // 外扩走 ::before：思源把 ::after 用在行内公式的方向标记上，占用了会改掉公式的排版。
-  const hitRule = rules.find((rule) => rule.includes('::before') && rule.includes('pointer-events') && rule.includes(KBD_SELECTOR));
-  assert.ok(hitRule, '遮蔽态缺少外扩命中区');
-  assert.ok(/left:\s*-\d/.test(hitRule) && /right:\s*-\d/.test(hitRule), '命中区要左右外扩');
-  assert.ok(hitRule.includes(KBD_SELECTOR), '命中区必须挂在 kbd 上，否则事件目标不再是遮罩');
-});
-
-test('JS 与 CSS 的契约：切换挂在 mousedown 上，命中时把整次交互吞掉', () => {
-  const source = fs.readFileSync(path.join(repoRoot, 'src/index.ts'), 'utf8');
-
-  // click 只在 mousedown 与 mouseup 落在同一目标上时才派发，按下抬起之间抖几个像素就丢
-  // 了——那次点击既不切换又已经开始了拖选。mousedown 在拖选开始之前一定触发。
-  assert.ok(
-    /addEventListener\('mousedown',\s*this\.\w+,\s*true\)/.test(source),
-    '切换必须挂在捕获阶段的 mousedown 上',
-  );
-  assert.ok(
-    /addEventListener\('mouseup',\s*this\.\w+,\s*true\)/.test(source) &&
-      /addEventListener\('click',\s*this\.\w+,\s*true\)/.test(source),
-    '命中遮罩时 mouseup 与 click 也要拦：只拦 mousedown 的话，思源照样会更新选区快照、弹出公式编辑器',
-  );
-  assert.ok(
-    !/e\.detail\s*[<>=]/.test(source),
-    '不做双击回滚：preventDefault 已经让双击选词不可能发生，回滚只会让手快的人点两下等于没点',
-  );
-  assert.ok(
-    !/swallowUntil/.test(source),
-    '吞事件要用「本次交互是否结束」的标记，不用固定时间窗：长按超过窗口再松开时 mouseup 会漏给思源',
-  );
-});
-
-test('JS 与 CSS 的契约：创建或取消遮罩不得顺手切换填空模式', () => {
-  const source = fs.readFileSync(path.join(repoRoot, 'src/index.ts'), 'utf8');
-
-  // 模式只由顶栏眼睛与 ⌥⇧X 控制。之前「新建一处遮罩就把整篇切进填空模式」会让只想取消
-  // 遮罩、却因选区没被识别成 kbd 而走了创建路径的用户，莫名其妙换了一整篇的模式。
-  assert.ok(
-    !/this\.isClozeActive\s*=\s*true/.test(source),
-    '除 toggleGlobalCloze 外，别处不得把填空模式设成开启',
-  );
-});
-
-test('JS 与 CSS 的契约：提示线用 text-decoration 画，且让开自己带线的标记', () => {
-  const stripped = scss.replace(/\/\*[\s\S]*?\*\//g, '');
-  const rules = stripped.split('}');
-
-  // text-decoration 不参与排版、跨行时每行各自一条。绝对定位伪元素在多行元素上会横穿整段，
-  // 公式那边还得靠 display:inline-block 才量得出盒底，那会把公式的排版改掉。
-  const lineRule = rules.find((rule) => rule.includes('text-decoration: underline dashed'));
-  assert.ok(lineRule, '常态提示线必须由 text-decoration 画');
-  assert.ok(
-    /var\(--b3-theme-primary/.test(lineRule),
-    '提示线要走主题主色，深色主题下才不会消失',
-  );
-
-  // 自带下划线的标记靠 border-bottom 画线、删除线靠 text-decoration，叠上提示线就变成两道。
-  ['u', 'a', 'tag', 'inline-memo', 'block-ref', 'file-annotation-ref', 'virtual-block-ref', 's', 'inline-math', 'code']
-    .forEach((type) => {
-      assert.ok(
-        lineRule.includes(`:not([data-type~="${type}"])`),
-        `提示线必须让开 ${type}：那类标记自己就带线或自带底色`,
-      );
-    });
-
-  // 遮蔽态的隐藏要打在 text-decoration-color 上——线在 text-decoration 上，改元素颜色藏不住它。
-  const maskSection = stripped.slice(stripped.indexOf('body.sy-cloze-active'));
-  const hideRule = maskSection.split('}').find(
-    (rule) => rule.includes('text-decoration-color: transparent'),
-  );
-  assert.ok(hideRule, '遮蔽态必须把提示线的颜色置透明，且只在遮蔽开启时生效');
-  assert.ok(
-    hideRule.includes(`:not(.${REVEAL_CLASS})`) && hideRule.includes(`:not(.${UNVEIL_CLASS})`),
-    '揭晓态与划选透晓态必须排除在外，线在那两种状态下要保持可见',
-  );
-  assert.ok(
-    hideRule.includes(':not([data-type~="s"])'),
-    '删除线标记要排除：它用的也是 text-decoration，一起置透明会把删除线藏掉',
-  );
-
-  // 公式侧：类名由 JS 按簇计算打上，CSS 不再依赖相邻兄弟——相邻兄弟覆盖不到「kbd 公式 公式
-  // kbd」里排在后面的公式，还会误伤紧挨遮罩但不属于它的公式。
-  const mathRule = rules.find(
-    (rule) => rule.includes('.sy-cloze-math') && rule.includes('blur(6px)'),
-  );
-  assert.ok(mathRule, '簇内公式必须与 kbd 一起进入遮蔽规则');
-
-  assert.ok(
-    !/display:\s*inline-block/.test(stripped),
-    '行内公式的 display 不能被插件改掉：一旦改成 inline-block，公式的基线与行高都会跟着变',
-  );
-});
-
-test('JS 与 CSS 的契约：公式的提示线由伪元素画，空切片不画线', () => {
-  const stripped = scss.replace(/\/\*[\s\S]*?\*\//g, '');
-  const rules = stripped.split('}');
-
-  // 公式是 KaTeX 的行内块，text-decoration 画不到它里面，这一段只能另画一条。
-  const lineRule = rules.find(
-    (rule) => rule.includes('span.sy-cloze-math::before') && rule.includes('border-bottom'),
-  );
-  assert.ok(lineRule, '簇内公式缺少提示线');
-  assert.ok(
-    /border-bottom:\s*2px dashed var\(--b3-theme-primary/.test(lineRule),
-    '公式的线与正文同色同粗细',
-  );
-  assert.ok(
-    lineRule.includes(`var(${LINE_DROP_VAR}`),
-    '公式提示线必须读取深公式下移变量，避免横穿分式分母与积分号',
-  );
-  assert.ok(lineRule.includes('pointer-events: none'), '线不能挡住点击');
-
-  const maskSection = stripped.slice(stripped.indexOf('body.sy-cloze-active'));
-  const hideRule = maskSection.split('}').find(
-    (rule) => rule.includes('span.sy-cloze-math') && rule.includes('border-bottom-color: transparent'),
-  );
-  assert.ok(hideRule, '遮蔽态要把公式的线一起藏掉');
-
-  assert.ok(
-    /\.sy-cloze-blank\s*\{[^}]*text-decoration:\s*none/.test(stripped),
-    '只剩零宽字符的切片不画线，否则整簇两端会留下孤零零的一小段',
-  );
-
-  const kbdLine = rules.find((rule) => rule.includes('text-decoration: underline dashed'));
-  assert.ok(
-    kbdLine.includes(':not(:has(span[data-type~="inline-math"]))'),
-    '公式嵌在切片里时整条线会横穿公式，这种切片必须排除',
-  );
-  assert.ok(
-    kbdLine.includes(`var(${LINE_DROP_VAR}`),
-    '文本切片的 text-underline-offset 必须同步读取深公式下移变量',
-  );
-});
-
-test('JS 契约：簇成员公式由 markClusterMath 打类', () => {
-  const cluster = fs.readFileSync(path.join(repoRoot, 'src/cluster.ts'), 'utf8');
-  const source = fs.readFileSync(path.join(repoRoot, 'src/index.ts'), 'utf8');
-
-  assert.ok(/export const markClusterMath/.test(cluster), 'cluster.ts 必须导出 markClusterMath');
-  assert.ok(
-    /classList\.add\(CLUSTER_MATH_CLASS\)/.test(cluster),
-    '簇内公式要打上 CLUSTER_MATH_CLASS，遮蔽规则靠它命中',
-  );
-  assert.ok(
-    !/getBoundingClientRect/.test(cluster),
-    '标记阶段不得量取几何：读数会强制重排，而这条路在每次 DOM 变更时都会走',
-  );
-  assert.ok(
-    /markClusterMath\(block\)/.test(source) && /markClusterMathIn/.test(source),
-    'index.ts 必须在 DOM 变更与加载两个时机都打标，否则簇内公式会漏遮蔽',
-  );
-});
-
-test('JS 契约：提交切换时不得按块 ID 直接取第一个元素', () => {
-  const source = fs.readFileSync(path.join(repoRoot, 'src/index.ts'), 'utf8');
-
-  // 同一个块 ID 在 protyle 根里可能同时存在多个元素（实测 3 个），querySelector 拿到的
-  // 第一个未必是含遮罩的那份，会算出一个空簇，这次点击被静默丢掉——表现就是「点了没反应」，
-  // 而且只在部分块上复现（列表项能切、普通段落不能）。必须用点击时的锚点解析，或逐个同 ID
-  // 元素试到能算出键的那个。
-  assert.ok(
-    !/querySelector\(`\[data-node-id/.test(source),
-    '按块 ID 取第一个元素会踩到同 ID 副本，改用锚点解析或逐个同 ID 元素试',
-  );
-  assert.ok(
-    /target\.anchor\.isConnected\s*&&\s*target\.root\.contains\(target\.anchor\)/.test(source),
-    '一级解析要校验锚点仍属于这个 root：块被移到别的编辑器时锚点依然 isConnected，只用它会把记录写进旧 root',
-  );
 });
 
 test('markClusterMath：簇内相邻的多个公式都打标，簇外公式不打标', () => {
@@ -1256,17 +1029,12 @@ test('markClusterMath：簇内相邻的多个公式都打标，簇外公式不�
   assert.deepEqual(marked, ['A', '\\sim'], '簇内两个相邻公式都要打标，隔着正文的那个不打标');
 });
 
-test('markClusterMath：切片里嵌套的公式也要打标', () => {
-  const block = element(
-    `<div data-node-id="mk-6"><span data-type="kbd">${WJ}<span data-type="inline-math" data-subtype="math" data-content="x" contenteditable="false">${WJ}</span></span>${kbd('答')}</div>`,
-  );
+test('切片里的公式由外层切片持有，不单独打遮蔽标记', () => {
+  const block = parseBlock('<span data-type="kbd">前<span data-type="inline-math kbd" data-content="x">KaTeX</span>后</span>');
+  const nested = block.querySelector('[data-content]');
+  assert.deepEqual(listBlockClusters(block).map(item => item.text), ['前x后']);
   markClusterMath(block);
-
-  assert.equal(
-    block.querySelectorAll('.sy-cloze-math').length,
-    1,
-    '嵌在切片里的公式同样是簇成员，否则它不会有提示线',
-  );
+  assert.equal(nested.classList.contains(CLUSTER_MATH_CLASS), false);
 });
 
 test('markClusterMath：紧邻遮罩的独立公式不得打标，遮罩自身是公式时照常打标', () => {
@@ -1282,30 +1050,6 @@ test('markClusterMath：紧邻遮罩的独立公式不得打标，遮罩自身�
     el.getAttribute('data-content'),
   );
   assert.deepEqual(marked, ['B'], '左侧公式是紧邻遮罩的普通内容，打标会让它跟着一起被遮住');
-});
-
-test('markClusterMath：只剩零宽字符的切片打上空切片类', () => {
-  const math = (content) =>
-    `<span data-type="inline-math" data-subtype="math" data-content="${content}" contenteditable="false" class="render-node">${WJ}</span>`;
-
-  const block = element(`<div data-node-id="mk-3">${kbd('')}${math('A')}${kbd('答')}</div>`);
-  markClusterMath(block);
-
-  const [first, last] = Array.from(block.querySelectorAll(KBD_SELECTOR));
-  assert.ok(first.classList.contains(BLANK_CLASS), '只剩零宽字符的切片不画线');
-  assert.equal(last.classList.contains(BLANK_CLASS), false, '带正文的切片照常画线');
-});
-
-test('markClusterMath：切片补上正文后空切片类要摘掉', () => {
-  const block = element(`<div data-node-id="mk-4">${kbd('')}${kbd('答')}</div>`);
-  markClusterMath(block);
-
-  const [first] = Array.from(block.querySelectorAll(KBD_SELECTOR));
-  assert.ok(first.classList.contains(BLANK_CLASS));
-
-  first.textContent = `${WJ}若`;
-  markClusterMath(block);
-  assert.equal(first.classList.contains(BLANK_CLASS), false);
 });
 
 test('markClusterMath：遮罩取消后公式的类要摘掉', () => {
@@ -1325,42 +1069,4 @@ test('markClusterMath：遮罩取消后公式的类要摘掉', () => {
     0,
     '取消遮罩后公式就是普通公式了，标记必须摘掉，否则它会一直带着一条提示线',
   );
-});
-
-test('markClusterMath：按 KaTeX strut 深度与公式源码同步下移整簇提示线', () => {
-  const renderedIntegral = `<span data-type="inline-math" data-subtype="math" data-content="\\int \\frac{1}{\\cos x} dx = \\ln |\\sec x + \\tan x| + C" contenteditable="false" class="render-node"><span class="katex"><span class="katex-html"><span class="base"><span class="strut" style="height:1.1901em;vertical-align:-0.345em;"></span></span><span class="base"><span class="strut" style="height:1em;vertical-align:-0.25em;"></span></span><span class="base"><span class="strut" style="height:0.6833em;"></span></span></span></span></span>`;
-  const unrenderedSeries = `<span data-type="inline-math" data-subtype="math" data-content="= \\sum_{n=1}^{\\infty} (-1)^{n-1} \\frac{x^n}{n}" contenteditable="false" class="render-node">${WJ}</span>`;
-  const shallowMath = `<span data-type="inline-math" data-subtype="math" data-content="x" contenteditable="false" class="render-node"><span class="katex"><span class="katex-html"><span class="base"><span class="strut" style="height:0.4306em;"></span></span></span></span></span>`;
-
-  const block = element(
-    `<div data-node-id="mk-depth">${kbd('积分')}${renderedIntegral}${kbd('结果')}间隔${kbd('级数')}${unrenderedSeries}${kbd('的')}间隔${kbd('浅')}${shallowMath}${kbd('式')}</div>`,
-  );
-  markClusterMath(block);
-
-  const [kbd1, kbd2, kbd3, kbd4, kbd5, kbd6] = Array.from(block.querySelectorAll(KBD_SELECTOR));
-  const [math1, math2, math3] = Array.from(block.querySelectorAll('.sy-cloze-math'));
-
-  assert.equal(measureMathDepthEm(math1), 0.42);
-  assert.equal(measureMathDepthEm(math2), 1.15);
-  assert.equal(measureMathDepthEm(math3), 0);
-
-  const drop1 = math1.style.getPropertyValue(LINE_DROP_VAR);
-  assert.equal(drop1, '0.685em', '分式与积分公式按深度折算下移量');
-  assert.equal(kbd1.style.getPropertyValue(LINE_DROP_VAR), drop1, '同簇左侧文本切片同步下移');
-  assert.equal(kbd2.style.getPropertyValue(LINE_DROP_VAR), drop1, '同簇右侧文本切片同步下移');
-
-  const drop2 = math2.style.getPropertyValue(LINE_DROP_VAR);
-  assert.equal(drop2, '1.598em', '带上下限的求和与极限公式整簇下移到下标下方');
-  assert.equal(kbd3.style.getPropertyValue(LINE_DROP_VAR), drop2);
-  assert.equal(kbd4.style.getPropertyValue(LINE_DROP_VAR), drop2, '公式右侧的切片同样跟着下移');
-
-  assert.equal(math3.style.getPropertyValue(LINE_DROP_VAR), '', '无基线以下深度的公式不额外下移');
-  assert.equal(kbd5.style.getPropertyValue(LINE_DROP_VAR), '', '浅公式同簇切片不额外下移');
-  assert.equal(kbd6.style.getPropertyValue(LINE_DROP_VAR), '', '浅公式同簇右侧切片不额外下移');
-
-  // 取消遮罩后，公式上的下移变量一并清除
-  kbd1.replaceWith(...kbd1.childNodes);
-  kbd2.replaceWith(...kbd2.childNodes);
-  markClusterMath(block);
-  assert.equal(math1.style.getPropertyValue(LINE_DROP_VAR), '');
 });

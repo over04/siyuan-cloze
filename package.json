@@ -6,7 +6,8 @@
   "scripts": {
     "build": "node esbuild.config.mjs",
     "dev": "node esbuild.config.mjs --watch",
-    "test": "node --disable-warning=MODULE_TYPELESS_PACKAGE_JSON --test tests/*.test.mjs"
+    "test": "node --disable-warning=MODULE_TYPELESS_PACKAGE_JSON --test tests/*.test.mjs",
+    "test:browser": "node --test tests/browser/*.test.mjs"
   },
   "keywords": [
     "siyuan",
@@ -19,6 +20,9 @@
   "devDependencies": {
     "esbuild": "^0.25.0",
     "jsdom": "^30.1.2",
+    "katex": "^0.19.1",
+    "playwright": "^1.65.1",
+    "pngjs": "^7.0.0",
     "sass": "^1.85.0",
     "siyuan": "^1.2.9",
     "typescript": "^5.7.3"

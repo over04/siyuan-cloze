@@ -31,12 +31,6 @@ export const MATH_SELECTOR = 'span[data-type~="inline-math"]';
 /** 簇成员里的行内公式加这个类，遮蔽规则据此把它与 kbd 一起模糊。 */
 export const CLUSTER_MATH_CLASS = 'sy-cloze-math';
 
-/** 簇里只剩零宽字符的 kbd 切片加这个类，样式表据此不给它画提示线。 */
-export const BLANK_CLASS = 'sy-cloze-blank';
-
-/** 簇内含深公式时写入的下划线垂直下移量（CSS 自定义属性名）。 */
-export const LINE_DROP_VAR = '--sy-cloze-line-drop';
-
 /** 划选时加在整簇每个成员上的透晓类，由 index.scss 的 :not() 反向生效。 */
 export const REVEAL_CLASS = 'sy-cloze-reveal';
 
@@ -91,7 +85,8 @@ export const getClozeCluster = (
   startKbd: HTMLElement,
   isBridge: (node: Node) => boolean = isClozeBridge,
 ): HTMLElement[] => {
-  if (!startKbd.closest('[data-node-id]')) return [startKbd];
+  startKbd = outerKbd(startKbd) || startKbd;
+  if (!resolveClozeBlock(startKbd)) return [startKbd];
 
   const collect = (direction: 'prev' | 'next'): HTMLElement[] => {
     const found: HTMLElement[] = [];
@@ -167,30 +162,42 @@ const scanClusterKbd = (from: Node, direction: 'prev' | 'next'): HTMLElement | n
   while (curr) {
     curr = direction === 'prev' ? curr.previousSibling : curr.nextSibling;
     if (!curr) return null;
-    if (isClozeBridge(curr) || isMath(curr)) continue;
     if (isKbd(curr)) return curr;
+    if (isClozeBridge(curr) || isMath(curr)) continue;
     return null;
   }
   return null;
 };
 
+/** 引用与公式可能自带 data-node-id；该属性在行内指向目标，不是宿主块。 */
+export const BLOCK_SELECTOR = '[data-node-id]:not(span)';
+export const BODY_SELECTOR = '.protyle-wysiwyg';
+export const resolveClozeBlock = (node: Node | null): HTMLElement | null =>
+  resolveElement(node)?.closest<HTMLElement>(BLOCK_SELECTOR) || null;
+export const resolveClozeBody = (node: Node | null): HTMLElement | null => {
+  const body = resolveElement(node)?.closest<HTMLElement>(BODY_SELECTOR);
+  return body && !body.closest('.protyle-wysiwyg--mindmap, .protyle--mindmap, [data-type="mindmap"]') ? body : null;
+};
+
+const outerKbd = (el: HTMLElement): HTMLElement | null => {
+  const block = resolveClozeBlock(el);
+  let outer: HTMLElement | null = null;
+  for (let p: HTMLElement | null = el; p && p !== block; p = p.parentElement) {
+    if (p.matches(KBD_SELECTOR)) outer = p;
+    if (p.matches(BODY_SELECTOR)) break;
+  }
+  return outer;
+};
+
 export const resolveClozeAnchor = (node: Node | null): HTMLElement | null => {
-  if (!node) return null;
-  const el = node.nodeType === Node.ELEMENT_NODE ? (node as HTMLElement) : node.parentElement;
+  const el = resolveElement(node);
   if (!el) return null;
-
-  const direct = el.closest<HTMLElement>(KBD_SELECTOR);
+  const direct = outerKbd(el);
   if (direct) return direct;
-
   const math = el.closest<HTMLElement>(MATH_SELECTOR);
   if (!math) return null;
-
-  const prevKbd = scanClusterKbd(math, 'prev');
-  const nextKbd = scanClusterKbd(math, 'next');
-  if (math.classList.contains(CLUSTER_MATH_CLASS)) {
-    return prevKbd || nextKbd;
-  }
-  return prevKbd && nextKbd ? prevKbd : null;
+  const prev = scanClusterKbd(math, 'prev');
+  return prev && scanClusterKbd(math, 'next') ? prev : null;
 };
 
 /** 把任意节点解析成元素（文本节点取其父元素）。 */
@@ -207,55 +214,15 @@ export const resolveElement = (node: Node | null): HTMLElement | null => {
  * 覆盖「选区横跨遮罩、起止都落在遮罩外面」这种情形。
  */
 export const findKbdInRange = (range: Range, block: Element | null): HTMLElement | null => {
-  const startKbd = resolveElement(range.startContainer)?.closest<HTMLElement>(KBD_SELECTOR);
-  if (startKbd) return startKbd;
-
-  const endKbd = resolveElement(range.endContainer)?.closest<HTMLElement>(KBD_SELECTOR);
-  if (endKbd) return endKbd;
-
-  const scope: ParentNode = block || document;
-  const kbds = scope.querySelectorAll<HTMLElement>(KBD_SELECTOR);
-  for (let i = 0; i < kbds.length; i++) {
-    try {
-      if (range.intersectsNode(kbds[i])) return kbds[i];
-    } catch {
-      continue;
-    }
-  }
-  return null;
+  return resolveClozeAnchor(range.startContainer) || resolveClozeAnchor(range.endContainer) ||
+    findClustersInRange(range, block)[0]?.find(isKbd) || null;
 };
 
-/**
- * 找出与划选范围相交的全部挖空簇，按 DOM 顺序返回。
- *
- * 取消遮罩时一次处理整段选区：用户选中多个遮罩再按快捷键，应当把选中的
- * 都取消，而不是只取消第一个。簇之间可能夹着普通内容，调用方按首尾成员
- * 扩展 Range 后交给 setInlineMark 统一清除。
- */
-export const findClustersInRange = (range: Range, block: Element | null): HTMLElement[][] => {
-  const scope: ParentNode = block || document;
-  const kbds = scope.querySelectorAll<HTMLElement>(KBD_SELECTOR);
-  const handled = new Set<HTMLElement>();
-  const clusters: HTMLElement[][] = [];
-
-  for (let i = 0; i < kbds.length; i++) {
-    const kbd = kbds[i];
-    if (handled.has(kbd)) continue;
-
-    let hit = false;
-    try {
-      hit = range.intersectsNode(kbd);
-    } catch {
-      hit = false;
-    }
-    if (!hit) continue;
-
-    const cluster = getClozeCluster(kbd);
-    cluster.forEach((el) => handled.add(el));
-    clusters.push(cluster);
-  }
-
-  return clusters;
+/** 选中夹在切片间的公式时也命中整簇。 */
+export const findClustersInRange = (range: Range, scope: ParentNode | null): HTMLElement[][] => {
+  const body = resolveClozeBody(range.startContainer);
+  return collectClusters(scope || document).filter(cluster => cluster.some(el =>
+    (!body || resolveClozeBody(el) === body) && range.intersectsNode(el)));
 };
 
 /* ==========================================================================
@@ -291,7 +258,12 @@ export const resolveProtyleRoot = (node: Node | null): HTMLElement | null => {
  * 这个属性，回落到 textContent。
  */
 const memberText = (el: HTMLElement): string => {
-  const raw = el.getAttribute('data-content') || el.textContent || '';
+  const contents = (node: Node): string => {
+    if (isMath(node)) return node.getAttribute('data-content') ?? '';
+    if (node.nodeType === Node.TEXT_NODE) return node.textContent || '';
+    return Array.from(node.childNodes, contents).join('');
+  };
+  const raw = contents(el);
   return raw.replace(/[\u200b\u2060\ufeff]/g, '').trim();
 };
 
@@ -332,18 +304,9 @@ export const listBlockClusters = (block: Element): BlockCluster[] => {
   const nodeId = block.getAttribute('data-node-id');
   if (!nodeId) return [];
 
-  const kbds = block.querySelectorAll<HTMLElement>(KBD_SELECTOR);
-  const handled = new Set<Element>();
   const duplicates = new Map<string, number>();
   const out: BlockCluster[] = [];
-
-  for (let i = 0; i < kbds.length; i++) {
-    const kbd = kbds[i];
-    if (handled.has(kbd)) continue;
-
-    const cluster = getClozeCluster(kbd);
-    cluster.forEach((el) => handled.add(el));
-
+  for (const cluster of collectClusters(block, block)) {
     const text = cluster.map(memberText).join('|');
     const dup = duplicates.get(text) || 0;
     duplicates.set(text, dup + 1);
@@ -367,150 +330,26 @@ export const getClusterKey = (block: Element | null, cluster: HTMLElement[]): st
   return found ? found.key : null;
 };
 
-/**
- * 读取单个行内公式在基线以下的最大深度（单位为 KaTeX 的 em）。
- *
- * KaTeX 在每个 .base 首部写入 `<span class="strut" style="height:...em;vertical-align:-...em;">`，
- * 其 vertical-align 负值即 TeX 排版引擎算出的基线以下深度。直接读取该内联样式字符串，
- * 不触发任何布局重排。若 KaTeX 尚未完成渲染，则依据 data-content 中的数学结构给出下界。
- */
-export const measureMathDepthEm = (mathEl: HTMLElement): number => {
-  let maxDepth = 0;
-
-  const struts = mathEl.querySelectorAll<HTMLElement>('.strut, [style*="vertical-align"]');
-  for (let i = 0; i < struts.length; i++) {
-    const style = struts[i].getAttribute('style') || '';
-    const match = /vertical-align\s*:\s*(-?\d+(?:\.\d+)?)em/i.exec(style);
-    if (!match) continue;
-    const val = Number(match[1]);
-    if (val < 0 && -val > maxDepth) {
-      maxDepth = -val;
-    }
+/** 只从外层切片起簇；子块与嵌套编辑器各自独立。 */
+export const collectClusters = (scope: ParentNode, block?: Element): HTMLElement[][] => {
+  const root = block ? resolveClozeBody(block) : null;
+  const seen = new Set<HTMLElement>();
+  const clusters: HTMLElement[][] = [];
+  for (const kbd of scope.querySelectorAll<HTMLElement>(KBD_SELECTOR)) {
+    if (seen.has(kbd) || outerKbd(kbd) !== kbd) continue;
+    if (block && (resolveClozeBlock(kbd) !== block || resolveClozeBody(kbd) !== root)) continue;
+    const cluster = getClozeCluster(kbd);
+    cluster.forEach(el => seen.add(el));
+    clusters.push(cluster);
   }
-
-  const depthRows = mathEl.querySelectorAll<HTMLElement>('.vlist-t2 > .vlist-r:nth-child(2) > .vlist');
-  for (let i = 0; i < depthRows.length; i++) {
-    const style = depthRows[i].getAttribute('style') || '';
-    const match = /height\s*:\s*(\d+(?:\.\d+)?)em/i.exec(style);
-    if (!match) continue;
-    const val = Number(match[1]);
-    if (val > maxDepth) {
-      maxDepth = val;
-    }
-  }
-
-  const raw = mathEl.getAttribute('data-content') || '';
-  if (!raw) return maxDepth;
-
-  let depth = maxDepth;
-  if (/\\begin\{(?:[bpvBV]?matrix|cases|dcases|rcases|aligned|align|array|smallmatrix|split|gather|gathered|subarray)\}|\\substack\b/.test(raw)) {
-    const rows = raw.split(/\\\\/).length;
-    depth = Math.max(depth, Math.max(0.55, (rows - 1) * 0.6 + 0.35));
-  }
-  if (
-    /\\(?:dfrac|cfrac)\b/.test(raw) ||
-    /\\limits\s*_/.test(raw) ||
-    /\\(?:sum|prod|coprod|bigcup|bigcap|bigoplus|bigotimes|lim|limsup|liminf|sup|inf|max|min)\s*(?:\\limits\s*)?_/.test(raw) ||
-    (/\\displaystyle\b/.test(raw) && /\\(?:frac|i+nt|oint|sum|prod|coprod|bigcup|bigcap|lim)\b/.test(raw))
-  ) {
-    depth = Math.max(depth, 1.15);
-  }
-  if (/\\(?:underbrace|underset)\b/.test(raw)) {
-    depth = Math.max(depth, 1.05);
-  }
-  if (/\\(?:d?frac|tfrac)\s*\{[^{}]*\}\s*\{[^}]*\\(?:d?frac|tfrac)/.test(raw)) {
-    depth = Math.max(depth, 0.75);
-  }
-  if (/\\(?:frac|tfrac|binom|dbinom|tbinom)\b/.test(raw)) {
-    depth = Math.max(depth, 0.42);
-  }
-  if (/\\(?:i+nt|oint|sum|prod|coprod|bigcup|bigcap|bigoplus|bigotimes|lim|limsup|liminf|sup|inf|max|min)\b/.test(raw)) {
-    depth = Math.max(depth, 0.36);
-  }
-  if (/\\(?:left|right|bigl|bigr|Bigl|Bigr|biggl|biggr|Biggl|Biggr|vert|Vert)\b|[|()[\]{}]/.test(raw)) {
-    depth = Math.max(depth, 0.25);
-  }
-  if (/[_]|\\sqrt\b|[gjpqy]|\\(?:mu|rho|phi|varphi|chi|psi|eta|gamma|beta|zeta|xi)\b/.test(raw)) {
-    depth = Math.max(depth, 0.2);
-  }
-  return depth;
+  return clusters;
 };
 
-/**
- * 给块内属于某个簇的行内公式打上簇成员类，并按簇内最大公式深度同步下划线偏移量。
- *
- * 公式是 kbd 的兄弟节点，CSS 的相邻兄弟选择器覆盖不到「kbd 公式 公式 kbd」里排在后面的
- * 公式。按同一套簇计算打标，同时把紧挨遮罩但不属于该遮罩的独立公式排除在外。
- *
- * Markdown 往返会把簇内公式上的 kbd 去掉（`<kbd>a</kbd>$x$` 读回时公式只有 inline-math），
- * 遮蔽规则与提示线规则都靠 CLUSTER_MATH_CLASS 命中它。只剩零宽字符的切片打上 BLANK_CLASS，
- * 样式表把它们略过，由公式自身的提示线接上。
- *
- * 行内公式保持 display: inline，其元素盒底停在正文字体基线下方约 0.2em 处，而分式、积分、
- * 矩阵等公式的可见内容会延伸到基线下方更深的位置。把整簇的最大下探深度折算为正文字号下的
- * em 值写入 `--sy-cloze-line-drop`，让公式伪元素与同行文本切片的提示线一起避开公式底部。
- */
+/** 只给平级公式打标；嵌在切片里的公式随切片一起模糊。 */
 export const markClusterMath = (block: Element): void => {
-  const seen = new Set<HTMLElement>();
-
-  block.querySelectorAll<HTMLElement>(KBD_SELECTOR).forEach((kbd) => {
-    if (seen.has(kbd)) return;
-
-    const cluster = getClozeCluster(kbd);
-    const mathMembers: HTMLElement[] = [];
-
-    cluster.forEach((el) => {
-      seen.add(el);
-      if (el.matches(MATH_SELECTOR)) {
-        mathMembers.push(el);
-      }
-      // 切片里嵌套的公式同样是簇的一部分（表格单元格里就是这种形态）
-      el.querySelectorAll<HTMLElement>(MATH_SELECTOR).forEach((nested) => {
-        seen.add(nested);
-        mathMembers.push(nested);
-      });
-    });
-
-    let maxDepth = 0;
-    for (let i = 0; i < mathMembers.length; i++) {
-      const d = measureMathDepthEm(mathMembers[i]);
-      if (d > maxDepth) maxDepth = d;
-    }
-
-    const dropEm = maxDepth > 0 ? Math.round((maxDepth * 1.25 + 0.16) * 1000) / 1000 : 0;
-    const applyDrop = (node: HTMLElement) => {
-      if (dropEm > 0) {
-        node.style.setProperty(LINE_DROP_VAR, `${dropEm}em`);
-      } else {
-        node.style.removeProperty(LINE_DROP_VAR);
-      }
-    };
-
-    cluster.forEach((el) => {
-      applyDrop(el);
-      if (el.matches(MATH_SELECTOR)) {
-        el.classList.add(CLUSTER_MATH_CLASS);
-        return;
-      }
-      el.classList.toggle(BLANK_CLASS, ZW_ONLY_TEXT.test(el.textContent || ''));
-      el.querySelectorAll<HTMLElement>(MATH_SELECTOR).forEach((nested) => {
-        nested.classList.add(CLUSTER_MATH_CLASS);
-        applyDrop(nested);
-      });
-    });
-  });
-
-  // 本块内不再属于任何簇的成员要把类与偏移变量一并摘掉（遮罩被取消后它们恢复为普通元素）。
-  block.querySelectorAll<HTMLElement>(MATH_SELECTOR).forEach((el) => {
-    if (seen.has(el)) return;
-    el.classList.remove(CLUSTER_MATH_CLASS);
-    el.style.removeProperty(LINE_DROP_VAR);
-  });
-
-  block.querySelectorAll<HTMLElement>(`.${BLANK_CLASS}`).forEach((el) => {
-    if (seen.has(el)) return;
-    el.classList.remove(BLANK_CLASS);
-    el.style.removeProperty(LINE_DROP_VAR);
+  const math = new Set(collectClusters(block, block).flat().filter(isMath));
+  block.querySelectorAll<HTMLElement>(MATH_SELECTOR).forEach(el => {
+    if (resolveClozeBlock(el) === block) el.classList.toggle(CLUSTER_MATH_CLASS, math.has(el));
   });
 };
 

@@ -128,7 +128,7 @@ const mount = (dataType, options = {}) => {
   ].filter(Boolean).join(' ');
 
   document.body.innerHTML =
-    `<div class="protyle-wysiwyg"><div data-node-id="block"><p><span id="target" ${attrs}>abc</span></p></div></div>`;
+    `<div class="protyle-wysiwyg sy-cloze-editor"><div data-node-id="block"><p><span id="target" ${attrs}>abc</span></p></div></div>`;
 
   return document.getElementById('target');
 };
@@ -149,7 +149,7 @@ const expectUntouched = (element, property, reason) => {
 
 /* ------------------------------------------------------------ 基础中和 */
 
-test('裸 kbd 被中和成普通文字，只留提示线', () => {
+test('裸 kbd 被中和成普通文字', () => {
   const el = mount('kbd');
 
   assert.equal(expectDeclared(el, 'font'), 'inherit');
@@ -160,7 +160,6 @@ test('裸 kbd 被中和成普通文字，只留提示线', () => {
   assert.equal(expectDeclared(el, 'box-shadow'), 'none');
   assert.equal(expectDeclared(el, 'vertical-align'), 'baseline');
   assert.equal(expectDeclared(el, 'color'), 'inherit');
-  assert.match(expectDeclared(el, 'text-decoration'), /^underline dashed var\(--b3-theme-primary/);
 
   // font 是简写：思源那条 kbd 规则会把 strong 的字重、code 的等宽一起重置，
   // 只压 font-size / font-family 压不住。
@@ -169,21 +168,16 @@ test('裸 kbd 被中和成普通文字，只留提示线', () => {
 
 test('正文容器之外的 kbd 不命中任何插件规则', () => {
   document.body.className = 'sy-cloze-active';
-  document.body.innerHTML = '<div class="protyle-wysiwyg"></div><div class="other-plugin"><span id="outside" data-type="kbd">abc</span></div>';
+  document.body.innerHTML = '<div class="protyle-wysiwyg sy-cloze-editor"></div><div class="other-plugin"><span id="outside" data-type="kbd">abc</span></div>';
 
   const outside = document.getElementById('outside');
   assert.equal(matchesAnyRule(outside), false, '样式必须限定在 .protyle-wysiwyg 内，否则其它插件的界面会被一起改写');
 });
 
-test('导出预览的正文容器同样中和', () => {
-  document.body.className = '';
+test('导出预览保留原生样式', () => {
+  document.body.className = 'sy-cloze-active';
   document.body.innerHTML = '<div class="b3-typography"><span id="exported" data-type="kbd">abc</span></div>';
-
-  const el = document.getElementById('exported');
-  assert.equal(expectDeclared(el, 'font'), 'inherit');
-  assert.equal(expectDeclared(el, 'background-color'), 'transparent');
-  assert.equal(expectDeclared(el, 'background-image'), 'none');
-  assert.match(expectDeclared(el, 'text-decoration'), /^underline dashed var\(--b3-theme-primary/);
+  assert.equal(matchesAnyRule(document.getElementById('exported')), false);
 });
 
 test('遮蔽态只在 body 开关打开时生效', () => {
@@ -244,21 +238,6 @@ test('标签的横向内边距要留着', () => {
 
 /* --------------------------------------------------------- 自带装饰的标记 */
 
-test('删除线、公式、代码不叠提示线', () => {
-  ['s kbd', 'inline-math kbd', 'code kbd'].forEach((type) => {
-    const el = mount(type);
-    expectUntouched(el, 'text-decoration', '这类标记自己就带线或自带底色');
-  });
-});
-
-test('提示线在遮蔽态置透明，删除线例外', () => {
-  const masked = mount('kbd');
-  assert.equal(expectDeclared(masked, 'text-decoration-color'), 'transparent');
-
-  const strike = mount('s kbd');
-  expectUntouched(strike, 'text-decoration-color', '删除线用的也是 text-decoration，一起置透明会把它藏掉');
-});
-
 /* ------------------------------------------------------------- 字体形状 */
 
 test('加粗与斜体写回思源原生取值', () => {
@@ -308,7 +287,7 @@ test('文字样式叠在高光上时，底色仍归高光', () => {
 test('簇内公式与 kbd 一起进入遮蔽规则', () => {
   document.body.className = 'sy-cloze-active';
   document.body.innerHTML =
-    '<div class="protyle-wysiwyg"><div data-node-id="block"><p><span id="math" class="sy-cloze-math">x</span></p></div></div>';
+    '<div class="protyle-wysiwyg sy-cloze-editor"><div data-node-id="block"><p><span id="math" class="sy-cloze-math">x</span></p></div></div>';
 
   const math = document.getElementById('math');
   assert.match(expectDeclared(math, 'filter'), /blur\(6px\)/);

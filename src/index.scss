@@ -1,24 +1,7 @@
-/* ==========================================================================
-   思源笔记行内挖空块样式表 (SiYuan Inline Cloze)
-
-   遮罩标记复用思源行内 kbd：自定义属性在 Markdown 往返中会被丢弃，只有 kbd 这个
-   标记本身能存活。思源会把多种行内标记合并进同一个 span 的 data-type
-   （strong kbd / mark kbd / code kbd / sup kbd / a kbd / block-ref kbd …），
-   所以中和 kbd 自制外观时必须逐个属性避开其它标记自己使用的属性，
-   并把被 kbd 的 font 简写重置掉的取值按思源原生写法写回。
-
-   排除条件一律包在 :where() 里：这类排除链动辄十来个 :not()，把它们算进特异性的话，
-   遮蔽段就再也压不住常态规则（text-decoration-color 会被提示线抢走）。包起来之后，
-   每条规则的特异性只由「作用域 + kbd」决定，先后顺序一眼可读。
-
-   作用域限定在 .protyle-wysiwyg（编辑器）与 .b3-typography（导出预览、浮窗、卡片、
-   移动端渲染）：两者都是思源自己的正文容器，其余界面（其它插件面板）一处不碰。
-   ========================================================================== */
-
+/* 仅在已挂载插件的正文里中和键帽；预览与导出采用思源原生样式。 */
 $kbd: 'span[data-type~="kbd"]';
 
-.protyle-wysiwyg,
-.b3-typography {
+.protyle-wysiwyg.sy-cloze-editor {
 
   /* ========================================================================
      一、中和 kbd 自带的键帽外观
@@ -50,7 +33,7 @@ $kbd: 'span[data-type~="kbd"]';
     font-variant-emoji: normal !important;
     margin: 0 !important;
     vertical-align: baseline !important;
-    position: relative !important; /* 遮蔽态外扩命中区的定位参照 */
+    position: relative !important;
     outline: none !important;
   }
 
@@ -100,41 +83,6 @@ $kbd: 'span[data-type~="kbd"]';
      没有其它着色标记时回落到继承色；其余类型在第三节写回主题色。 */
   #{$kbd}:where(:not([data-type~="strong"]):not([data-type~="em"]):not([data-type~="s"]):not([data-type~="u"]):not([data-type~="mark"]):not([data-type~="code"]):not([data-type~="a"]):not([data-type~="tag"]):not([data-type~="block-ref"]):not([data-type~="file-annotation-ref"]):not([data-type~="search-mark"]):not([data-type~="text"])) {
     color: inherit !important;
-  }
-
-  /* ========================================================================
-     二、常态提示线
-
-     用 text-decoration 画：不参与排版，跨行时每行各自一条。绝对定位伪元素在多行
-     元素上会拉出一条贯穿整段的长线。自带下划线的标记、删除线与行内代码不再叠线。
-     行内公式是 KaTeX 的行内块，线画不到它里面，单独用伪元素补上那一段；
-     簇内含深公式时由 JS 写入 --sy-cloze-line-drop，让公式与同行文本切片的提示线
-     一起下移到公式最低点下方，避免横穿分式分母、积分号与矩阵。
-     公式嵌在切片里面时（表格单元格里就是这种形态）整条线会横穿公式，这种切片不画线。
-     ======================================================================== */
-  #{$kbd}:where(:not([data-type~="u"]):not([data-type~="a"]):not([data-type~="tag"]):not([data-type~="inline-memo"]):not([data-type~="block-ref"]):not([data-type~="file-annotation-ref"]):not([data-type~="virtual-block-ref"]):not([data-type~="s"]):not([data-type~="inline-math"]):not([data-type~="code"])):not(:has(span[data-type~="inline-math"])) {
-    text-decoration: underline dashed var(--b3-theme-primary, rgba(130, 130, 130, .85)) !important;
-    text-decoration-thickness: 2px !important;
-    text-underline-offset: calc(2px + var(--sy-cloze-line-drop, 0em)) !important;
-  }
-
-  span.sy-cloze-math {
-    position: relative;
-  }
-
-  span.sy-cloze-math::before {
-    content: '';
-    position: absolute;
-    left: 0;
-    right: 0;
-    bottom: calc(-2px - var(--sy-cloze-line-drop, 0em));
-    border-bottom: 2px dashed var(--b3-theme-primary, rgba(130, 130, 130, .85));
-    pointer-events: none;
-  }
-
-  /* 被公式切开的空切片只剩零宽字符，画出来是孤零零一小段，整簇靠公式那段接上 */
-  #{$kbd}.sy-cloze-blank {
-    text-decoration: none !important;
   }
 
   /* ========================================================================
@@ -192,45 +140,21 @@ $kbd: 'span[data-type~="kbd"]';
    开关挂在 body 上，作用域收进编辑器正文：新建的编辑器（分栏、单元格、
    ProtyleLite）同样生效，编辑器之外一处也不碰。
    ========================================================================== */
-body.sy-cloze-active .protyle-wysiwyg {
+body.sy-cloze-active .protyle-wysiwyg.sy-cloze-editor {
 
   /* 簇内成员一起遮蔽：kbd 切片，以及被 kbd 夹住、往返后不再带 kbd 的行内公式 */
-  span[data-type~="kbd"]:not(.sy-cloze-reveal):not(.sy-cloze-unveiled),
+  span[data-type~="kbd"]:not(span[data-type~="kbd"] span):not(.sy-cloze-reveal):not(.sy-cloze-unveiled),
   span.sy-cloze-math:not(.sy-cloze-reveal):not(.sy-cloze-unveiled) {
     filter: blur(6px) grayscale(100%) !important;
     opacity: .65 !important;
     position: relative !important;
   }
 
-  /* 提示线在遮蔽态藏掉。线在 text-decoration 上，隐藏也必须写 text-decoration-color；
-     删除线标记排除在外，免得把 line-through 一起藏了。 */
-  span[data-type~="kbd"]:not([data-type~="s"]):not(.sy-cloze-reveal):not(.sy-cloze-unveiled) {
-    text-decoration-color: transparent !important;
-  }
-
-  span.sy-cloze-math:not(.sy-cloze-reveal):not(.sy-cloze-unveiled)::before,
-  span[data-type~="kbd"][data-type~="inline-math"]:not(.sy-cloze-reveal):not(.sy-cloze-unveiled)::before {
-    border-bottom-color: transparent !important;
-  }
-
-  /* 遮蔽态的命中区外扩：blur 让模糊块看起来比实际宽一圈，内边距归零后更明显。
-     ::before 空着不用，::after 留给思源行内公式的方向标记。 */
-  span[data-type~="kbd"]:not(.sy-cloze-reveal):not(.sy-cloze-unveiled)::before,
-  span.sy-cloze-math:not(.sy-cloze-reveal):not(.sy-cloze-unveiled)::before {
-    content: '' !important;
-    position: absolute !important;
-    left: -6px !important;
-    right: -6px !important;
-    top: -.4em !important;
-    bottom: calc(-.4em - var(--sy-cloze-line-drop, 0em)) !important;
-    background: transparent !important;
-    pointer-events: auto !important;
-  }
-
   /* 手型光标只在遮蔽开启时出现 */
   span[data-type~="kbd"],
   span.sy-cloze-math {
     cursor: pointer !important;
+    -webkit-touch-callout: none;
   }
 }
 
@@ -240,10 +164,10 @@ body.sy-cloze-active .protyle-wysiwyg {
    点击揭晓与 ⌥⇧X 全局切换时 JS 给受影响的元素挂 .sy-cloze-animating，一小段后摘掉。
    回放补类不带它，因此思源重建 DOM 不会产生任何可见动画。
    ========================================================================== */
-.protyle-wysiwyg span[data-type~="kbd"].sy-cloze-animating,
-.protyle-wysiwyg span[data-type~="kbd"].sy-cloze-animating *,
-.protyle-wysiwyg span.sy-cloze-math.sy-cloze-animating,
-.protyle-wysiwyg span.sy-cloze-math.sy-cloze-animating * {
+.protyle-wysiwyg.sy-cloze-editor span[data-type~="kbd"].sy-cloze-animating,
+.protyle-wysiwyg.sy-cloze-editor span[data-type~="kbd"].sy-cloze-animating *,
+.protyle-wysiwyg.sy-cloze-editor span.sy-cloze-math.sy-cloze-animating,
+.protyle-wysiwyg.sy-cloze-editor span.sy-cloze-math.sy-cloze-animating * {
   transition: filter .25s ease-in-out, opacity .25s ease-in-out !important;
 }
 
@@ -251,4 +175,22 @@ body.sy-cloze-active .protyle-wysiwyg {
 .toolbar__item.protyle-icon--active,
 .b3-menu__item.protyle-icon--active {
   color: var(--b3-theme-primary) !important;
+}
+
+.cloze-underlines {
+  position: absolute;
+  inset: 0 auto auto 0;
+  width: 1px;
+  height: 1px;
+  overflow: visible;
+  pointer-events: none;
+  user-select: none;
+  z-index: 1;
+
+  line {
+    stroke: var(--b3-theme-primary, rgba(130, 130, 130, .85));
+    vector-effect: non-scaling-stroke;
+    stroke-width: 2px;
+    stroke-dasharray: 4px 3px;
+  }
 }
