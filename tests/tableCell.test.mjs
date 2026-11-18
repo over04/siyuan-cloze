@@ -1,16 +1,4 @@
-/**
- * 表格单元格退避的纯函数层回归测试。
- *
- * 断言口径：偏移一律锚在**可见文本**（剔除 ZWSP / WordJoiner / ZWNBSP）上，
- * 因为退避前后思源会重建 td，零宽字符的数量与位置都会漂移；用 range.toString()
- * 直接比对会被这些不可见字符污染，所以断言前统一过一遍 visibleText()。
- *
- * 覆盖两层：
- *   1. 形态判定——closestCellEditor 只认 .table__cell-editor（编辑态），
- *      内联态单元格必须落空，否则插件会对着正常单元格走退避分支；
- *   2. 偏移往返——getVisibleOffset 与 createRangeByVisibleOffset 必须互逆，
- *      这是退避后能把选区原样找回来的唯一依据。
- */
+/** 表格选区与挖空快捷键测试。 */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
@@ -19,9 +7,9 @@ import { fileURLToPath } from 'node:url';
 
 import { WJ, ZW, setupDom } from './helpers.mjs';
 import {
+  cellEditableRanges,
   closestCellEditor,
-  createRangeByVisibleOffset,
-  getVisibleOffset,
+  closestTableCell,
   isRichCell,
   isZeroWidth,
   matchHotkey,
@@ -84,67 +72,47 @@ test('isRichCell 只看 data-sy-table-cell-rich', () => {
   assert.equal(isRichCell(null), false);
 });
 
-test('getVisibleOffset 把偏移锚在可见文字上', () => {
-  const cell = inlineCell(`${ZW}甲${ZW}乙${ZW}`);
-  const text = cell.firstChild;
-  // 整段是一个文本节点：\u200b甲\u200b乙\u200b
-  assert.equal(getVisibleOffset(cell, text, 0), 0);
-  // 越过「零宽 + 甲」→ 可见偏移 1
-  assert.equal(getVisibleOffset(cell, text, 2), 1);
-  // 走到末尾 → 可见偏移 2
-  assert.equal(getVisibleOffset(cell, text, text.textContent.length), 2);
+test('closestTableCell：支持表头与表体，使用最近的单元格', () => {
+  const head = document.createElement('th');
+  head.textContent = '标题';
+  const cell = editingCell('<span>答案</span>');
+  assert.equal(closestTableCell(head.firstChild), head);
+  assert.equal(closestTableCell(cell.querySelector('span').firstChild), cell);
+  assert.equal(closestTableCell(null), null);
 });
 
-test('getVisibleOffset 支持元素节点端点', () => {
-  const cell = inlineCell('甲<span>乙</span>');
-  const span = cell.querySelector('span');
-  assert.equal(getVisibleOffset(cell, span, 0), 1);
-  assert.equal(getVisibleOffset(cell, span, 1), 2);
+function cellBody() {
+  const cell = editingCell('<div class="protyle-wysiwyg">' +
+    '<div data-node-id="one"><div contenteditable="true">首段答案</div></div>' +
+    '<div data-node-id="two"><div contenteditable="true">中间内容</div></div>' +
+    '<div data-node-id="code" data-type="NodeCodeBlock"><div contenteditable="true">代码</div></div>' +
+    '<div data-node-id="three"><div contenteditable="true">最后一段</div></div></div>');
+  return cell.querySelector('.protyle-wysiwyg');
+}
+
+test('cellEditableRanges：按正文块分开选区，保留首尾边界', () => {
+  const body = cellBody();
+  const range = document.createRange();
+  range.setStart(body.firstElementChild.firstElementChild.firstChild, 2);
+  range.setEnd(body.lastElementChild.firstElementChild.firstChild, 2);
+  assert.deepEqual(cellEditableRanges(body, range).map(item => [item.block.dataset.nodeId, item.range.toString()]),
+    [['one', '答案'], ['two', '中间内容'], ['three', '最后']]);
 });
 
-test('getVisibleOffset 对单元格外的节点返回 -1', () => {
-  const cell = inlineCell('甲');
-  const outside = document.createElement('div');
-  outside.textContent = '乙';
-  assert.equal(getVisibleOffset(cell, outside.firstChild, 0), -1);
+test('cellEditableRanges：光标落在段内时只返回当前段', () => {
+  const body = cellBody();
+  const range = document.createRange();
+  const text = body.children[1].firstElementChild.firstChild;
+  range.setStart(text, 1);
+  range.collapse(true);
+  const items = cellEditableRanges(body, range);
+  assert.equal(items.length, 1);
+  assert.equal(items[0].block.dataset.nodeId, 'two');
+  assert.equal(items[0].range.startContainer, text);
+  assert.equal(items[0].range.startOffset, 1);
 });
 
-test('createRangeByVisibleOffset 能跨零宽字符重建选区', () => {
-  const cell = inlineCell(`${ZW}甲${ZW}乙${ZW}`);
-  const range = createRangeByVisibleOffset(cell, 1, 2);
-  assert.ok(range);
-  assert.equal(visibleText(range.toString()), '乙');
-});
-
-test('多节点内联单元格也能按可见偏移重建', () => {
-  const cell = inlineCell(`甲<span data-type="kbd">${WJ}乙</span>`);
-  const range = createRangeByVisibleOffset(cell, 0, 2);
-  assert.ok(range);
-  assert.equal(visibleText(range.toString()), '甲乙');
-});
-
-test('偏移往返一致', () => {
-  const cell = inlineCell(`${ZW}甲${ZW}乙${ZW}`);
-  const range = createRangeByVisibleOffset(cell, 0, 2);
-  assert.ok(range);
-  assert.equal(getVisibleOffset(cell, range.startContainer, range.startOffset), 0);
-  assert.equal(getVisibleOffset(cell, range.endContainer, range.endOffset), 2);
-});
-
-test('偏移越界或区间非法时返回 null，不做兜底猜测', () => {
-  const cell = inlineCell('甲');
-  assert.equal(createRangeByVisibleOffset(cell, 0, 9), null);
-  assert.equal(createRangeByVisibleOffset(cell, 2, 1), null);
-  assert.equal(createRangeByVisibleOffset(cell, -1, 1), null);
-});
-
-test('空单元格无法落位时返回 null', () => {
-  const cell = inlineCell('');
-  assert.equal(createRangeByVisibleOffset(cell, 0, 0), null);
-});
-
-/* 单元格编辑态下思源不会分发插件快捷键，只能由插件在捕获阶段自己匹配，
-   所以这套匹配逻辑必须单独锁死。 */
+// 单元格子编辑器不分发插件快捷键，插件自行匹配按键。
 
 test('parseHotkeyBindings 兼容新旧两种绑定格式', () => {
   assert.deepEqual(parseHotkeyBindings({ custom: '⌥Q' }), ['⌥Q']);

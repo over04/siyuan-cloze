@@ -9,6 +9,7 @@ import {
   findClustersInRange,
   getClozeCluster,
   getClusterKey,
+  listBlockClusters,
   markClusterMath,
   resolveClozeAnchor,
   resolveClozeBlock,
@@ -19,8 +20,9 @@ import {
 import {
   HIDING_CLASS,
   UnveilStore,
-  dropUnveilForBlockId,
+  dropBlockUnveil,
   forgetBlockOrder,
+  forgetBlockOrderAfterCreate,
   rememberBlockOrder,
   replayBlockUnveil,
   resetAllUnveil,
@@ -28,17 +30,17 @@ import {
   type ToggleTarget,
 } from './unveil';
 import {
-  CELL_CONTENT_SELECTOR,
   CELL_SELECTOR,
+  cellEditableRanges,
   closestCellEditor,
-  createRangeByVisibleOffset,
-  getVisibleOffset,
+  closestTableCell,
   isMacPlatform,
   isRichCell,
   matchHotkey,
   resolveHotkeyBindings,
 } from './tableCell';
 import { UnderlineLayer } from './underline';
+import { appliedInlineMask, currentInlineBlock, snapshotInlineMask } from './inlineMark';
 
 /** 创建/取消挖空的工具栏图标。 */
 const CLOZE_ICON = `<symbol id="iconCloze" viewBox="0 0 32 32">
@@ -82,6 +84,7 @@ export default class ClozePlugin extends Plugin {
   private domObserver?: MutationObserver;
   /** 单元格编辑态下的快捷键兜底监听（捕获阶段）。 */
   private cellShortcutHandler?: (e: KeyboardEvent) => void;
+  private readonly pendingCellOpens = new WeakSet<HTMLTableCellElement>();
   /** 移动端键盘工具栏的插件项点击监听。 */
   private pluginToolbarClickHandler?: (e: Event) => void;
   private pluginToolbarTouchStart?: { x: number; y: number; moved: boolean };
@@ -170,7 +173,7 @@ export default class ClozePlugin extends Plugin {
       hotkey: '⇧⌘C',
       tip: String(this.i18n.createClozeTip || '创建/取消行内挖空'),
       click: (protyle: any) => {
-        this.handleStandardClozeAction(protyle, false, undefined, true);
+        this.handleStandardClozeAction(protyle, undefined, true);
       },
     });
 
@@ -229,7 +232,7 @@ export default class ClozePlugin extends Plugin {
 
       const editor = getActiveEditor();
       const protyle = editor ? (editor as any).protyle : (window as any)?.siyuan?.mobile?.editor?.protyle ?? null;
-      this.handleStandardClozeAction(protyle, false, undefined, true);
+      this.handleStandardClozeAction(protyle, undefined, true);
     };
 
     document.addEventListener('touchstart', this.pluginToolbarClickHandler, true);
@@ -267,7 +270,10 @@ export default class ClozePlugin extends Plugin {
 
       const selection = window.getSelection();
       if (!selection || selection.rangeCount === 0) return;
-      if (!closestCellEditor(selection.getRangeAt(0).startContainer)) return;
+      const range = selection.getRangeAt(0);
+      const cell = closestTableCell(range.startContainer);
+      if (!cell || cell !== closestTableCell(range.endContainer) ||
+          (!closestCellEditor(range.startContainer) && !isRichCell(cell))) return;
 
       if (!this.matchesClozeHotkey(event)) return;
 
@@ -276,7 +282,8 @@ export default class ClozePlugin extends Plugin {
       event.stopPropagation();
 
       const editor = getActiveEditor();
-      this.handleStandardClozeAction(editor ? (editor as any).protyle : null);
+      const protyle = (editor as any)?.protyle ?? (window as any)?.siyuan?.mobile?.editor?.protyle;
+      this.handleStandardClozeAction(protyle, range);
     };
 
     document.addEventListener('keydown', this.cellShortcutHandler, true);
@@ -405,92 +412,117 @@ export default class ClozePlugin extends Plugin {
   private initClickToggle() {
     this.gestureEvents = new AbortController();
     const signal = this.gestureEvents.signal;
-    const capture = { capture: true, passive: false, signal };
-    const owned = new Set<number>();
-    let tap: { target: ToggleTarget; id: number; x: number; y: number; at: number } | undefined;
-    let released: { id: number; x: number; y: number; at: number } | undefined;
-    const reset = () => { owned.clear(); tap = undefined; released = undefined; };
+    const capture = { capture: true, signal };
+    type Point = { node: Node; offset: number };
+    type Tap = { target: ToggleTarget; id: number; x: number; y: number; at: number; touch: boolean };
+    let press: (Tap & { body: HTMLElement; origin: Point | null; moved: boolean }) | undefined;
+    let released: (Tap & { handled: boolean }) | undefined;
+    const reset = () => { press = undefined; released = undefined; };
     this.cancelGesture = reset;
-
     const anchorAt = (node: EventTarget | null) => this.isClozeActive && node instanceof Node && resolveClozeBody(node)
       ? resolveClozeAnchor(node) : null;
-    const stop = (event: Event) => event.stopImmediatePropagation();
-    const consume = (event: Event) => { event.preventDefault(); stop(event); };
-    const distance = (a: { x: number; y: number }, b: MouseEvent) => Math.hypot(a.x - b.clientX, a.y - b.clientY);
+    const consume = (event: Event) => { event.preventDefault(); event.stopImmediatePropagation(); };
+    const distance = (a: { x: number; y: number }, b: { clientX: number; clientY: number }) => Math.hypot(a.x - b.clientX, a.y - b.clientY);
+    const matchesRelease = (end: NonNullable<typeof released>, event: MouseEvent) =>
+      event.button === 0 && event.detail > 0 && event.timeStamp - end.at < 650 && distance(end, event) <= 8 &&
+      (!('pointerId' in event) || event.pointerId === end.id || event.pointerId === 0);
+    const confirm = (end: NonNullable<typeof released>, x: number, y: number) => {
+      // 一处挖空可能有多个元素，用实际落点确认是不是同一处。
+      const target = this.resolveToggleTarget(document.elementFromPoint(x, y));
+      if (!target || target.root !== end.target.root || target.key !== end.target.key || !this.toggleTarget(target)) return;
 
-    // 在 window 捕获阶段接管命中挖空的按下；切换仍等到同簇轻点抬起。
-    window.addEventListener('pointerdown', e => {
-      released = undefined;
-      if (!e.isPrimary) tap = undefined;
-      const anchor = anchorAt(e.target);
-      if (!anchor) return;
-      owned.add(e.pointerId);
-      consume(e);
-      if (e.isPrimary && e.button === 0 && !e.shiftKey && !e.altKey && !e.ctrlKey && !e.metaKey) {
-        const target = this.resolveToggleTarget(anchor);
-        if (target) tap = { target, id: e.pointerId, x: e.clientX, y: e.clientY, at: e.timeStamp };
+      clearEditorSelection(resolveClozeBody(target.anchor));
+    };
+    const clearEditorSelection = (body: HTMLElement | null) => {
+      const selection = window.getSelection();
+      if (body && selection?.rangeCount && resolveClozeBody(selection.anchorNode) === body &&
+          resolveClozeBody(selection.focusNode) === body) {
+        selection.removeAllRanges();
+        this.updateReveal();
       }
+    };
+    const textPoint = (x: number, y: number, body: HTMLElement): Point | null => {
+      const caret = document.caretPositionFromPoint?.(x, y);
+      const fallback = caret ? null : document.caretRangeFromPoint?.(x, y);
+      const node = caret?.offsetNode ?? fallback?.startContainer;
+      return node && resolveClozeBody(node) === body ? { node, offset: caret?.offset ?? fallback!.startOffset } : null;
+    };
+    const updateDrag = (start: NonNullable<typeof press>, event: PointerEvent) => {
+      if (!start.moved && distance(start, event) <= 7) return;
+      start.moved = true;
+      if (!start.origin?.node.isConnected) return;
+      const end = textPoint(event.clientX, event.clientY, start.body);
+      if (end) window.getSelection()?.setBaseAndExtent(start.origin.node, start.origin.offset, end.node, end.offset);
+    };
+
+    window.addEventListener('pointerdown', e => {
+      reset();
+      if (!e.isPrimary || e.button !== 0 || e.shiftKey || e.altKey || e.ctrlKey || e.metaKey) return;
+      const target = this.resolveToggleTarget(anchorAt(e.target));
+      const body = target && resolveClozeBody(target.anchor);
+      if (!target || !body) return;
+      const touch = e.pointerType === 'touch';
+      press = { target, body, id: e.pointerId, x: e.clientX, y: e.clientY, at: e.timeStamp,
+        touch, moved: false, origin: touch ? null : textPoint(e.clientX, e.clientY, body) };
+      if (!touch) {
+        // 隔开思源的按下处理，但保留浏览器产生 mouseup 的能力，让拖选结束后工具栏照常更新。
+        e.stopImmediatePropagation();
+        clearEditorSelection(body);
+      }
+    }, capture);
+    window.addEventListener('mousedown', e => {
+      // 浏览器在 mousedown 的默认处理中放置光标。必须在按下时阻止，不能等 click 再清理。
+      if (press && !press.touch && e.button === 0 && distance(press, e) <= 8) consume(e);
     }, capture);
     window.addEventListener('pointermove', e => {
-      if (!owned.has(e.pointerId)) {
-        if (e.buttons === 0 && anchorAt(e.target)) stop(e);
-        return;
-      }
-      if (tap?.id === e.pointerId && distance(tap, e) > 7) tap = undefined;
-      stop(e);
+      if (press?.id === e.pointerId) updateDrag(press, e);
     }, capture);
     window.addEventListener('pointerup', e => {
-      if (!owned.delete(e.pointerId)) {
-        if (anchorAt(e.target)) consume(e);
-        return;
-      }
-      consume(e);
-      released = { id: e.pointerId, x: e.clientX, y: e.clientY, at: e.timeStamp };
-      const start = tap?.id === e.pointerId ? tap : undefined;
+      const start = press?.id === e.pointerId ? press : undefined;
       if (!start) return;
-      tap = undefined;
-      if (e.button !== 0 || e.timeStamp - start.at > 430 || distance(start, e) > 7) return;
-      // 触摸会隐式捕获指针，抬起时用实际落点，而不是被捕获的事件目标。
+      press = undefined;
+      updateDrag(start, e);
+      if (start.moved || e.button !== 0 || (start.touch && e.timeStamp - start.at > 430)) return;
+      // 触摸可能捕获指针，用实际落点而不是事件目标。
       const end = this.resolveToggleTarget(document.elementFromPoint(e.clientX, e.clientY));
-      if (end && end.root === start.target.root && end.key === start.target.key) this.toggleTarget(end);
+      if (end && end.root === start.target.root && end.key === start.target.key) {
+        released = { target: end, id: e.pointerId, x: e.clientX, y: e.clientY, at: e.timeStamp, touch: start.touch, handled: false };
+        if (!start.touch) e.stopImmediatePropagation();
+      }
     }, capture);
-    window.addEventListener('pointercancel', e => {
-      if (tap?.id === e.pointerId) tap = undefined;
-      if (owned.delete(e.pointerId)) stop(e);
+    window.addEventListener('touchend', e => {
+      const end = released;
+      if (!end?.touch || end.handled || Math.abs(e.timeStamp - end.at) > 50) return;
+      if (![...e.changedTouches].some(touch => distance(end, touch) <= 8)) return;
+      // 只接管已经确认的轻触，防止浏览器补发鼠标双击后选中文字。滑动和长按不走这里。
+      consume(e);
+      end.handled = true;
+      confirm(end, end.x, end.y);
+    }, { ...capture, passive: false });
+    // 只有已经判定为点击时，才阻止编辑器把这次松手当成选中文字。
+    window.addEventListener('mouseup', e => {
+      if (released && matchesRelease(released, e)) e.stopImmediatePropagation();
     }, capture);
-
-    // click 不受 pointerdown.preventDefault() 保证；原生点击处理不能依赖揭晓是否成功。
-    const swallowMouse = (e: MouseEvent) => {
-      if (anchorAt(e.target)) { consume(e); return; }
-      if (released && e.detail > 0 && e.timeStamp - released.at < 650 && distance(released, e) <= 8 &&
-          (!('pointerId' in e) || e.pointerId === released.id || e.pointerId === 0)) consume(e);
-    };
-    for (const type of ['mousedown', 'mouseup', 'click', 'dblclick', 'auxclick'] as const) {
-      window.addEventListener(type, swallowMouse, capture);
+    window.addEventListener('click', e => {
+      const end = released;
+      released = undefined;
+      if (end && matchesRelease(end, e)) {
+        consume(e);
+        if (!end.handled) confirm(end, e.clientX, e.clientY);
+      } else if (anchorAt(e.target)) consume(e);
+    }, capture);
+    for (const type of ['pointercancel', 'dragstart', 'contextmenu'] as const) {
+      window.addEventListener(type, reset, capture);
+    }
+    for (const type of ['dblclick', 'auxclick'] as const) {
+      window.addEventListener(type, e => { if (anchorAt(e.target)) consume(e); }, capture);
     }
     for (const type of ['pointerover', 'pointerenter', 'mouseover', 'mouseenter', 'mousemove'] as const) {
       window.addEventListener(type, e => {
-        if (e.buttons === 0 && anchorAt(e.target)) stop(e);
+        if (e.buttons === 0 && anchorAt(e.target)) e.stopImmediatePropagation();
       }, capture);
     }
-    const cancelAction = (e: Event) => {
-      if (!owned.size && !anchorAt(e.target)) return;
-      tap = undefined;
-      consume(e);
-    };
-    window.addEventListener('contextmenu', cancelAction, capture);
-    window.addEventListener('dragstart', cancelAction, capture);
-    window.addEventListener('selectstart', cancelAction, capture);
-
-    // 拦截旧触摸监听及补发点击，保留浏览器原生的滑动滚动和缩放。
-    for (const type of ['touchstart', 'touchmove', 'touchend', 'touchcancel'] as const) {
-      window.addEventListener(type, e => {
-        if (!Array.from(e.changedTouches).some(touch => anchorAt(touch.target))) return;
-        if (type === 'touchend') consume(e);
-        else stop(e);
-      }, capture);
-    }
-    window.addEventListener('scroll', () => { tap = undefined; }, { capture: true, passive: true, signal });
+    window.addEventListener('scroll', reset, { capture: true, passive: true, signal });
     window.addEventListener('blur', reset, { signal });
   }
 
@@ -636,65 +668,147 @@ export default class ClozePlugin extends Plugin {
      五、行内挖空动作（⇧⌘C，选区语义对齐思源 setInlineMark）
      ======================================================================== */
 
-  /**
-   * 从单元格编辑态退避：先把 ProtyleLite 提交掉，再按可见文本偏移重建选区重执行。
-   *
-   * 思源在 document 捕获阶段监听 pointerdown，目标不属于编辑器时会执行其 finish()，
-   * 把 td 还原成可事务化的形态——这就是退避的着力点，不需要任何私有 API。
-   * finish 之后 td 会被重建，原 Range 必然失效，因此只能靠可见文本偏移找回选区。
-   */
-  private retreatFromCellEditor(
-    protyle: any,
-    selection: Selection,
-    range: Range,
-    cellEditor: HTMLElement,
-  ) {
-    const cell = cellEditor.closest(CELL_SELECTOR);
-    if (!cell) {
-      showMessage(String(this.i18n.cellSelectionNotFound || '未能在单元格内定位选区，请重新选择'), 2000, 'info');
+  private openCellAndApplyCloze(protyle: any, cell: HTMLTableCellElement, range: Range, selection: Selection) {
+    const body = resolveClozeBody(cell);
+    const table = cell.closest<HTMLElement>('[data-type="NodeTable"]');
+    const tableId = table?.dataset.nodeId;
+    const row = cell.closest('tr')?.rowIndex;
+    const col = cell.cellIndex;
+    const removing = Boolean(this.caretAnchor(range));
+    const lifetime = this.gestureEvents?.signal;
+    if (!body || !table || !tableId || row === undefined || !lifetime || protyle?.disabled || protyle?.wysiwyg?.element !== body) {
+      this.showClozeFailure(removing);
+      return;
+    }
+    if (this.pendingCellOpens.has(cell)) return;
+    this.pendingCellOpens.add(cell);
+
+    selection.removeAllRanges();
+    selection.addRange(range);
+    const collapsed = range.collapsed;
+    const applyWhenReady = () => {
+      if (!body.isConnected) { finish(); return; }
+      const current = window.getSelection();
+      if (!current?.rangeCount) return;
+      const restored = current.getRangeAt(0);
+      const host = closestCellEditor(restored.startContainer);
+      if (!host || host !== closestCellEditor(restored.endContainer) || restored.collapsed !== collapsed) return;
+      const currentCell = host.closest<HTMLTableCellElement>(CELL_SELECTOR);
+      const liveTable = currentInlineBlock(body, table, tableId);
+      if (!currentCell || currentCell.cellIndex !== col || currentCell.closest('tr')?.rowIndex !== row ||
+          currentCell.closest('[data-type="NodeTable"]') !== liveTable) return;
+      finish();
+      this.applyClozeInCellEditor(protyle, host, restored.cloneRange(), current);
+    };
+    const observer = new MutationObserver(applyWhenReady);
+    const pending = new AbortController();
+    const finish = () => {
+      observer.disconnect();
+      pending.abort();
+      lifetime.removeEventListener('abort', finish);
+      window.clearTimeout(timer);
+      this.pendingCellOpens.delete(cell);
+    };
+    const timer = window.setTimeout(() => {
+      finish();
+      if (body.isConnected) this.showClozeFailure(removing);
+    }, 1800);
+    lifetime.addEventListener('abort', finish, { once: true });
+    document.addEventListener('selectionchange', applyWhenReady, { signal: pending.signal });
+    // 用户开始别的操作时，不再修改原来的选区。
+    document.addEventListener('pointerdown', finish, { capture: true, signal: pending.signal });
+    document.addEventListener('keydown', finish, { capture: true, signal: pending.signal });
+    observer.observe(body, { childList: true, subtree: true });
+    // 思源用方向键松开事件从预览进入单元格，并自行恢复其中的选区。
+    // 只发送 keyup，避免浏览器移动光标或插入内容。
+    body.dispatchEvent(new KeyboardEvent('keyup', { key: 'ArrowRight', code: 'ArrowRight' }));
+  }
+
+  private applyClozeInCellEditor(protyle: any, host: HTMLElement, range: Range, selection: Selection) {
+    const body = host.querySelector<HTMLElement>(BODY_SELECTOR);
+    const ownerToolbar = protyle?.toolbar;
+    if (!body || !body.contains(range.startContainer) || !body.contains(range.endContainer) ||
+        protyle?.disabled || typeof ownerToolbar?.setInlineMarkInBlock !== 'function') {
+      this.showClozeFailure(Boolean(this.caretAnchor(range)));
       return;
     }
 
-    // 偏移必须锚在「单元格内容区」上：编辑态的内容挂在 ProtyleLite 的 .protyle-wysiwyg 里，
-    // 退避后则由 td 直接承载。拿整个 td 去算偏移会被编辑器外壳（表格控件按钮等）的文本
-    // 带偏，恢复时必然越界——实测表现就是「选区恢复失败」。
-    const contentRoot = cellEditor.querySelector(CELL_CONTENT_SELECTOR) || cellEditor;
-    const start = getVisibleOffset(contentRoot, range.startContainer, range.startOffset);
-    const end = getVisibleOffset(contentRoot, range.endContainer, range.endOffset);
-    if (start < 0 || end < 0) {
-      showMessage(String(this.i18n.cellSelectionNotFound || '未能在单元格内定位选区，请重新选择'), 2000, 'info');
+    const caret = range.collapsed ? this.caretAnchor(range) : null;
+    if (range.collapsed && !caret) {
+      showMessage(String(this.i18n.noSelection || '请先选中文本或将光标置于挖空块内'), 2000, 'info');
       return;
     }
-
-    // 派发到 body：既不属于单元格编辑器，也不在外层 wysiwyg 内，
-    // 正好命中思源「目标不属于编辑器就 finish」这一条分支。
-    const PointerCtor: typeof PointerEvent =
-      typeof PointerEvent === 'function' ? PointerEvent : (MouseEvent as unknown as typeof PointerEvent);
-    document.body.dispatchEvent(new PointerCtor('pointerdown', { bubbles: true, cancelable: true }));
-
-    window.requestAnimationFrame(() => {
-      if (!cell.isConnected) {
-        showMessage(String(this.i18n.cellInvalid || '单元格已失效，请重新选择'), 2000, 'info');
-        return;
-      }
-
-      // rich 形态：单元格内容已按持久化的复杂块存着，外层 setInlineMark 依然不适用。
-      // 如实告知，而不是硬闯出一次事务错误。
-      if (isRichCell(cell)) {
-        showMessage(String(this.i18n.cellRich || '该单元格内容较复杂，请退出单元格编辑后再试'), 2500, 'info');
-        return;
-      }
-
-      const restored = createRangeByVisibleOffset(cell, start, end);
-      if (!restored) {
-        showMessage(String(this.i18n.cellRestoreFailed || '选区恢复失败，请重新选择'), 2000, 'info');
-        return;
-      }
-
-      selection.removeAllRanges();
-      selection.addRange(restored);
-      this.handleStandardClozeAction(protyle, true);
+    const targets = cellEditableRanges(body, range).map(({ block, range: segment }) => {
+      const clusters = caret && block.contains(caret) ? [getClozeCluster(caret)] : findClustersInRange(segment, block);
+      return { block, range: segment, cluster: clusters.flat() };
     });
+    const removing = targets.some(item => item.cluster.length > 0);
+    const edits = targets.flatMap(item => {
+      if (removing && !item.cluster.length) return [];
+      if (removing) {
+        item.range.setStartBefore(item.cluster[0]);
+        item.range.setEndAfter(item.cluster[item.cluster.length - 1]);
+      }
+      const before = snapshotInlineMask(item.block, item.range);
+      return before.selection ? [{ ...item, before, previous: listBlockClusters(item.block).map(entry => entry.text) }] : [];
+    });
+    if (!edits.length) { this.showClozeFailure(removing); return; }
+
+    // 复用思源的行内格式处理。明确传入添加/删除，进入其不发送事务的分支；
+    // 单元格编辑器观察内容变化，由思源以所属表格的 ID 保存并记录撤销。
+    const toolbar = Object.create(ownerToolbar);
+    const local = { ...protyle, wysiwyg: { element: body }, toolbar };
+    let applied = 0;
+    let firstResult: Range | undefined;
+    let lastResult: Range | undefined;
+    try {
+      for (const { block, range: segment, before, previous } of edits) {
+        toolbar.range = segment;
+        toolbar.setInlineMarkInBlock(local, 'kbd', 'range', undefined, removing, false);
+        if (!appliedInlineMask(before, snapshotInlineMask(block), removing)) continue;
+        applied++;
+        firstResult ??= toolbar.range.cloneRange();
+        lastResult = toolbar.range.cloneRange();
+        this.finishClozeBlock(block, removing, previous);
+      }
+    } catch (error) {
+      console.warn('[Cloze] Table cell inline mark failed:', error);
+    }
+    if (firstResult && lastResult && body.contains(firstResult.startContainer) && body.contains(lastResult.endContainer)) {
+      firstResult.setEnd(lastResult.endContainer, lastResult.endOffset);
+      selection.removeAllRanges();
+      selection.addRange(firstResult);
+    }
+    if (applied !== edits.length) this.showClozeFailure(removing);
+    else this.showClozeSuccess(removing);
+  }
+
+  private showClozeFailure(removing: boolean) {
+    const message = removing
+      ? String(this.i18n.removeFailed || '未能确认挖空已取消，请检查选区后再试')
+      : String(this.i18n.createFailed || '未能确认挖空已创建，请检查选区后再试');
+    showMessage(message, 2500, 'info');
+  }
+
+  private showClozeSuccess(removing: boolean) {
+    const message = removing
+      ? String(this.i18n.clozeRemoved || '已取消整块行内挖空遮罩')
+      : String(this.i18n.clozeCreated || '已创建行内挖空块');
+    showMessage(message, 1500, 'info');
+  }
+
+  private finishClozeBlock(block: HTMLElement, removing: boolean, previous: string[]) {
+    const root = resolveProtyleRoot(block);
+    if (removing) {
+      forgetBlockOrder(this.unveilStore, root, block.getAttribute('data-node-id'));
+      const records = this.unveilStore.peek(root);
+      if (records) dropBlockUnveil(records, block);
+    } else {
+      forgetBlockOrderAfterCreate(this.unveilStore, block, previous);
+    }
+    this.refreshBlock(block);
+    if (root) this.refreshBlockCopies(block, root);
+    this.scheduleRevealUpdate();
   }
 
   /**
@@ -718,21 +832,22 @@ export default class ClozePlugin extends Plugin {
     const current = selection && selection.rangeCount > 0 ? selection.getRangeAt(0) : null;
     const saved = protyle?.toolbar?.range as Range | undefined;
 
+    // 单元格有自己的编辑器，外层工具栏可能还记着另一段正文。
+    if (preferSaved && valid(current)) {
+      const host = closestCellEditor(current.startContainer);
+      if (host && host === closestCellEditor(current.endContainer) && (!current.collapsed || this.caretAnchor(current))) {
+        return current.cloneRange();
+      }
+    }
     if (preferSaved && valid(saved)) return saved.cloneRange();
     if (valid(current)) return current.cloneRange();
     if (valid(saved)) return saved.cloneRange();
     return null;
   }
 
-  /**
-   * 1. 跨段落检查：禁止跨越不同 [data-node-id] 块容器；
-   * 2. 光标单点一键取消：光标停在遮罩内任意位置时，自动向上捕获整个连续集群，瞬间全块取消；
-   * 3. 划选选区处理：已全部覆盖则一键清除，未全部覆盖则统一打上遮罩；
-   * 4. 彻底依托思源官方 AST 与 Undo 事务，零 DOM 撕碎，零格式损坏。
-   */
+  /** 正文和表格共用入口，分别通过各自的编辑器保存。 */
   private handleStandardClozeAction(
     protyle: any,
-    isRetry = false,
     preferredRange?: Range,
     preferSaved = false,
   ) {
@@ -754,17 +869,19 @@ export default class ClozePlugin extends Plugin {
 
     if (!resolveClozeBody(range.startContainer) || resolveClozeBody(range.startContainer) !== resolveClozeBody(range.endContainer)) return;
 
-    // 表格单元格编辑态：td 已被 openTableCellRichEditor 整体换成独立 ProtyleLite，
-    // 单元格内的块是**没有持久 ID 的临时块**。此时若继续走外层 protyle 的事务，
-    // 内核会以 block not found 拒绝并回滚——前端 DOM 看着像加上了 kbd，数据却不落库。
-    // 先退避：提交掉单元格编辑器，等 td 回到可事务化形态，再按偏移重建选区重执行。
+    const startCell = closestTableCell(range.startContainer);
+    const endCell = closestTableCell(range.endContainer);
+    if (startCell !== endCell) {
+      showMessage(String(this.i18n.crossCell || '请在同一个单元格内选中文字或公式'), 2000, 'info');
+      return;
+    }
     const cellEditor = closestCellEditor(range.startContainer);
     if (cellEditor) {
-      if (isRetry) {
-        showMessage(String(this.i18n.cellStillEditing || '单元格仍处于编辑状态，请点击单元格外部后再试'), 2500, 'info');
-        return;
-      }
-      this.retreatFromCellEditor(protyle, selection, range, cellEditor);
+      this.applyClozeInCellEditor(protyle, cellEditor, range, selection);
+      return;
+    }
+    if (startCell && isRichCell(startCell)) {
+      this.openCellAndApplyCloze(protyle, startCell, range, selection);
       return;
     }
 
@@ -835,79 +952,29 @@ export default class ClozePlugin extends Plugin {
 
     if (protyle && protyle.toolbar && typeof protyle.toolbar.setInlineMark === 'function') {
       try {
-        // 关键：思源 setInlineMark 只读 protyle.toolbar.range 这份缓存快照，并不读 DOM Selection；
-        // 它的更新时机仅限 mouseup/keyup/input 等事件。而表格单元格编辑器对
-        // mousedown/mouseup/click 一律 stopPropagation，外层根本收不到，于是这份快照会停在
-        // 「点开单元格那一刻的折叠光标」上。创建与取消都必须显式写回当前选区，
-        // 否则创建会静默无事发生、取消会退化为只撤掉光标所在的那一个切片。
-        protyle.toolbar.range = range.cloneRange();
+        const body = resolveClozeBody(startBlock);
+        const blockNodeId = startBlock.getAttribute('data-node-id');
+        if (!body || !blockNodeId) return;
 
-        let currentTypes: string[] = [];
-        if (typeof protyle.toolbar.getCurrentType === 'function') {
-          try {
-            currentTypes = protyle.toolbar.getCurrentType(range) || [];
-          } catch {}
+        const removing = targetClusters.length > 0;
+        const before = snapshotInlineMask(startBlock, range);
+        const previous = removing ? [] : listBlockClusters(startBlock).map(item => item.text);
+        if (!before.selection) {
+          this.showClozeFailure(removing);
+          return;
         }
 
-        const isFullyMarked = currentTypes.includes('kbd') || targetClusters.length > 0;
-        const kbdBefore = startBlock.querySelectorAll(KBD_SELECTOR).length;
-
-        // 取消之前先把记录坐标取好：setInlineMark 之后块 DOM 可能被整体重建，
-        // 届时 startBlock 已脱离文档，再也问不出它属于哪个 protyle。
-        const unveilRoot = resolveProtyleRoot(startBlock);
-        const blockNodeId = startBlock.getAttribute('data-node-id');
-
-        // 调用思源官方原生管道执行标准化处理（等价于思源原生行内标记）。
-        // 不注入任何自定义属性：Markdown 序列化只保留 kbd 的文本内容，
-        // 附加属性在保存/重载后必然丢失，故集群完全由渲染层可见内容连续性重建。
+        // 思源读取的是工具栏保存的 Range。原生切换只能调用一次，重复会把结果再切回去。
+        protyle.toolbar.range = range.cloneRange();
         protyle.toolbar.setInlineMark(protyle, 'kbd', 'range');
 
-        // 校验实际结果，不再只凭意图报喜。
-        // 集群成员若仍是 kbd，说明这一次没有取消成功；此时自动重试一次
-        // （第二次 protyle.toolbar.range 已是整簇，rangeTypes 必然收得到 kbd），
-        // 仍失败就如实提示，绝不谎报「已取消」。
-        let stillMarked = isFullyMarked &&
-          cluster.some((el) => el.isConnected && el.matches(KBD_SELECTOR));
-        if (stillMarked) {
-          protyle.toolbar.setInlineMark(protyle, 'kbd', 'range');
-          stillMarked = cluster.some((el) => el.isConnected && el.matches(KBD_SELECTOR));
+        const currentBlock = currentInlineBlock(body, startBlock, blockNodeId);
+        if (!currentBlock || !appliedInlineMask(before, snapshotInlineMask(currentBlock), removing)) {
+          this.showClozeFailure(removing);
+          return;
         }
-
-        if (startBlock.isConnected) {
-          this.invalidateBlock(startBlock);
-        }
-        this.scheduleRevealUpdate();
-
-        // 创建同样要验收：事务被内核拒绝时前端 DOM 可能毫无变化，
-        // 不校验就会谎报「已创建」。
-        const createdOk = !isFullyMarked &&
-          startBlock.querySelectorAll(KBD_SELECTOR).length > kbdBefore;
-
-        if (createdOk) {
-          // 块里多了一个遮罩，上一轮的簇顺序不再对应「同一个位置还是同一个遮罩」，
-          // 基线就此作废；下一次回放结束时会自然重建。
-          forgetBlockOrder(this.unveilStore, unveilRoot, blockNodeId);
-        }
-
-        let msg: string;
-        let duration = 1500;
-        if (!isFullyMarked) {
-          if (createdOk) {
-            msg = String(this.i18n.clozeCreated || '已创建行内挖空块');
-          } else {
-            msg = String(this.i18n.createFailed || '创建未生效，请重试或把光标置于段落内');
-            duration = 2500;
-          }
-        } else if (stillMarked) {
-          msg = String(this.i18n.removeFailed || '取消未生效，请把光标放进挖空块再试一次');
-          duration = 2500;
-        } else {
-          msg = String(this.i18n.clozeRemoved || '已取消整块行内挖空遮罩');
-          // 遮罩已拆，该块的揭晓记录随之作废：不清理的话，同块内重新创建的遮罩
-          // 若答案文本恰好与旧记录相同，会一出现就是揭晓态。
-          dropUnveilForBlockId(this.unveilStore, unveilRoot, blockNodeId);
-        }
-        showMessage(msg, duration, 'info');
+        this.finishClozeBlock(currentBlock, removing, previous);
+        this.showClozeSuccess(removing);
         return;
       } catch (err) {
         console.warn('[Cloze] Standard setInlineMark failed:', err);

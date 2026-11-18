@@ -190,6 +190,12 @@ export const findClusterByKey = (block: Element, key: string): HTMLElement[] | n
 /** 判定「同一个簇被编辑过」所需的最低相似度：公共子序列占较长文本的比例。 */
 const SIMILAR_RATIO = 0.5;
 
+const countTexts = (texts: string[]): Map<string, number> => {
+  const counts = new Map<string, number>();
+  for (const text of texts) counts.set(text, (counts.get(text) || 0) + 1);
+  return counts;
+};
+
 /** 最长公共子序列的长度；只留两行，避免为一次判据分配整张二维表。 */
 const commonLength = (a: string, b: string): number => {
   let prev = new Array<number>(b.length + 1).fill(0);
@@ -332,30 +338,16 @@ export const replayBlockUnveil = (store: UnveilStore, block: Element): void => {
   const previous = orders.get(nodeId);
   const texts = items.map((item) => item.text);
 
-  const countTexts = (list: string[]): Map<string, number> => {
-    const counts = new Map<string, number>();
-    list.forEach((text) => counts.set(text, (counts.get(text) || 0) + 1));
-    return counts;
-  };
-
-  const previousCounts = previous ? countTexts(previous) : null;
-  const currentCounts = countTexts(texts);
-
-  // 块内簇数真的变少，同时某个「原本重复」的答案文本数量下降，才说明用户删掉了重复
-  // 答案中的一个：剩下那些的编号会整体前移，逐条对号会把揭晓态从被删的那个挪到另一个
-  // 文字相同的遮罩上。这些文本一律强制遮蔽。
-  //
-  // 只作废它们自己的记录，不整块清空——同块内其它簇的揭晓态不该被牵连。
-  // 也不在「簇数没变」时触发：那只是用户把一个重复答案改成了别的文本，位置并没有前移，
-  // 位置对齐本来就认得出来（`甲 乙 乙` 改掉末尾那个 `乙` 不该把中间那个也熄灭）。
-  // 空文本不计入：它只出现在重建中间态，拿它去比会把记录误清掉。
   const blocked = new Set<string>();
-  if (previous && previousCounts && previous.length > items.length) {
-    previousCounts.forEach((count, text) => {
-      if (text !== '' && count > 1 && (currentCounts.get(text) || 0) < count) {
-        blocked.add(text);
-      }
-    });
+  // 结构增删会改变重复答案的序号，不能用旧序号猜身份。数量未变则仍按编辑回放处理。
+  // 空文本可能只是渲染中间态，不据此作废记录。
+  if (previous && previous.length !== items.length && !texts.includes('')) {
+    const previousCounts = countTexts(previous);
+    const currentCounts = countTexts(texts);
+    for (const [text, count] of previousCounts) {
+      const current = currentCounts.get(text) || 0;
+      if (text !== '' && count !== current && Math.max(count, current) > 1) blocked.add(text);
+    }
   }
 
   const claimed = new Map<string, string>();
@@ -433,13 +425,10 @@ export const replayBlockUnveil = (store: UnveilStore, block: Element): void => {
     });
   }
 
-  // 记录迁移：文本变了的那一簇，键要跟着改到新文本上。不改的话下一轮又会走一遍
-  // 位置级，而且旧键永远对不上号、会被当成失效记录清掉。
-  claimed.forEach((oldKey, newKey) => {
-    if (oldKey === newKey || blankMatch.has(newKey)) return;
-    records.delete(oldKey);
-    records.set(newKey, true);
-  });
+  // 先删除所有待迁移的源键，再写目标键。若两个键互换，不能边删边写。
+  const moves = [...claimed].filter(([newKey, oldKey]) => oldKey !== newKey && !blankMatch.has(newKey));
+  for (const [, oldKey] of moves) records.delete(oldKey);
+  for (const [newKey] of moves) records.set(newKey, true);
 
   // 已恢复正常、能对上号的键，从待确认集合里移出。
   claimed.forEach((oldKey, newKey) => {
@@ -575,6 +564,30 @@ export const forgetBlockOrder = (
 ): void => {
   if (!root || !nodeId) return;
   store.orders(root).delete(nodeId);
+};
+
+/** 创建成功后，新出现或增多的答案不继承旧记录，其他文本仍可精确回放。 */
+export const forgetBlockOrderAfterCreate = (store: UnveilStore, block: HTMLElement, previous: string[]): void => {
+  const root = resolveProtyleRoot(block);
+  const nodeId = block.getAttribute('data-node-id');
+  forgetBlockOrder(store, root, nodeId);
+  const records = store.peek(root);
+  if (!root || !nodeId || !records?.size) return;
+
+  const items = listBlockClusters(block);
+  const before = countTexts(previous);
+  const after = countTexts(items.map(item => item.text));
+  const newTexts = new Set([...after].filter(([text, count]) => count > (before.get(text) || 0)).map(([text]) => text));
+  const suspects = store.suspects(root);
+  for (const key of records.keys()) {
+    const parts = parseClusterKey(key);
+    if (parts.nodeId !== nodeId || !newTexts.has(parts.text)) continue;
+    records.delete(key);
+    suspects.delete(key);
+  }
+  for (const { cluster, text } of items) {
+    if (newTexts.has(text)) cluster.forEach(el => el.classList.remove(UNVEIL_CLASS, HIDING_CLASS));
+  }
 };
 
 /**

@@ -485,6 +485,34 @@ test('forgetBlockOrder：丢掉基线后，同位置的相似新遮罩不得继�
   assert.ok(!kbdsOf(block)[1].classList.contains(UNVEIL_CLASS));
 });
 
+test('原生插入同答案的新挖空时，不把旧揭晓态交给新簇', () => {
+  const store = new UnveilStore();
+  const { protyle, block } = mountProtyle('blk', kbd('甲') + ' ' + kbd('乙'));
+  clickUnveil(store, protyle, block, kbdsOf(block)[0]);
+  clickUnveil(store, protyle, block, kbdsOf(block)[1]);
+
+  block.insertAdjacentHTML('afterbegin', kbd('甲') + ' ');
+  replayBlockUnveil(store, block);
+  replayBlockUnveil(store, block);
+
+  assert.deepEqual(kbdsOf(block).map(el => el.classList.contains(UNVEIL_CLASS)), [false, false, true]);
+  assert.deepEqual([...store.peek(protyle).keys()], ['blk#乙@0']);
+});
+
+test('两条揭晓记录交换键时，迁移不覆盖另一条记录', () => {
+  const store = new UnveilStore();
+  const { protyle, block } = mountProtyle('blk', kbd('cat') + ' ' + kbd('car'));
+  clickUnveil(store, protyle, block, kbdsOf(block)[0]);
+  clickUnveil(store, protyle, block, kbdsOf(block)[1]);
+  block.innerHTML = kbd('car') + ' ' + kbd('cat');
+
+  replayBlockUnveil(store, block);
+  assert.deepEqual([...store.peek(protyle).keys()].sort(), ['blk#car@0', 'blk#cat@0']);
+  replayBlockUnveil(store, block);
+  replayBlockUnveil(store, block);
+  assert.equal(unveiledCount(block), 2);
+});
+
 test('replayUnveilInto：无重复答案文本的块里改文本只清该簇，不牵连同块其它簇', () => {
   const store = new UnveilStore();
   const { protyle, block } = mountProtyle('blk', kbd('甲') + ' ' + kbd('乙'));

@@ -6,6 +6,19 @@ interface Box { left: number; right: number; top: number; bottom: number }
 interface Fragment extends Box { baseline: number; cluster?: HTMLElement[]; draw: boolean }
 interface Row { baseline: number; fragments: Fragment[] }
 interface Line { left: number; right: number; y: number }
+interface Underline {
+  group: SVGGElement;
+  lines: SVGLineElement[];
+  shown: boolean;
+  animation?: Animation;
+}
+interface BlockState {
+  visible: boolean;
+  dirty: boolean;
+  ready: boolean;
+  underlines: Map<HTMLElement, Underline>;
+}
+const FADE_MS = 250; // 与文字的遮挡动画时长一致。
 const RADIUS = 1; // 2 CSS px stroke
 const NATIVE = 'a, u, s, del, strike, code, [data-type~="u"], [data-type~="a"], [data-type~="tag"], [data-type~="s"], [data-type~="code"], [data-type~="inline-memo"], [data-type~="virtual-block-ref"], [data-type~="block-ref"], [data-type~="file-annotation-ref"]';
 const SVG = 'http://www.w3.org/2000/svg';
@@ -45,13 +58,9 @@ function clipFor(container: HTMLElement, fixedOnly = false): Box {
   return clip;
 }
 
-function fragmentsIn(block: HTMLElement, clusters: HTMLElement[][], masking: boolean) {
+function fragmentsIn(block: HTMLElement, clusters: HTMLElement[][], drawn: ReadonlySet<HTMLElement[]>) {
   const owners = new Map<HTMLElement, HTMLElement[]>();
-  const visible = new Set<HTMLElement[]>();
-  for (const cluster of clusters) {
-    if (!masking || cluster.some(el => el.classList.contains(REVEAL_CLASS) || el.classList.contains(UNVEIL_CLASS))) visible.add(cluster);
-    cluster.forEach(el => owners.set(el, cluster));
-  }
+  for (const cluster of clusters) cluster.forEach(el => owners.set(el, cluster));
   const containers = new Map<HTMLElement, Fragment[]>();
   const styleCache = new Map<HTMLElement, CSSStyleDeclaration>();
   const styleOf = (el: HTMLElement) => {
@@ -64,7 +73,7 @@ function fragmentsIn(block: HTMLElement, clusters: HTMLElement[][], masking: boo
     if (box.right - box.left < .05 || box.bottom <= box.top) return;
     const list = containers.get(container) || [];
     if (!containers.has(container)) containers.set(container, list);
-    list.push({ left: box.left, right: box.right, top: box.top, bottom: box.bottom, baseline, cluster, draw: Boolean(cluster && visible.has(cluster) && !exempt) });
+    list.push({ left: box.left, right: box.right, top: box.top, bottom: box.bottom, baseline, cluster, draw: Boolean(cluster && drawn.has(cluster) && !exempt) });
   };
 
   function walk(node: Node, container: HTMLElement, cluster?: HTMLElement[], exempt = false) {
@@ -134,11 +143,10 @@ function subtract(intervals: Interval[], left: number, right: number): Interval[
   });
 }
 
-function measure(block: HTMLElement, masking: boolean): Line[] {
-  const clusters = collectClusters(block, block);
-  if (!clusters.some(cluster => !masking || cluster.some(el => el.classList.contains(REVEAL_CLASS) || el.classList.contains(UNVEIL_CLASS)))) return [];
-  const result: Line[] = [];
-  const groups = fragmentsIn(block, clusters, masking);
+function measure(block: HTMLElement, clusters: HTMLElement[][], drawn: ReadonlySet<HTMLElement[]>): Map<HTMLElement, Line[]> {
+  const result = new Map<HTMLElement, Line[]>();
+  if (!drawn.size) return result;
+  const groups = fragmentsIn(block, clusters, drawn);
   const all = [...groups.values()].flat();
   for (const [container, fragments] of groups) {
     if (!fragments.some(f => f.draw)) continue;
@@ -147,6 +155,7 @@ function measure(block: HTMLElement, masking: boolean): Line[] {
     const rows = rowsOf(fragments);
     for (const row of rows) {
       for (const cluster of new Set(row.fragments.filter(f => f.draw).map(f => f.cluster))) {
+        if (!cluster) continue;
         const active = row.fragments.filter(f => f.cluster === cluster);
         const drawable = active.filter(f => f.draw).sort((a,b) => a.left - b.left);
         const other = row.fragments.filter(f => !f.draw || f.cluster !== cluster);
@@ -169,10 +178,13 @@ function measure(block: HTMLElement, masking: boolean): Line[] {
         for (const f of obstacles) {
           if (f.top < y + RADIUS && f.bottom > y - RADIUS) spans = subtract(spans, f.left, f.right);
         }
+        const anchor = cluster[0];
+        const lines = result.get(anchor) ?? [];
         for (const [a,b] of spans) {
           const left = Math.max(a, clip.left), right = Math.min(b, clip.right);
-          if (right > left) result.push({ left, right, y });
+          if (right > left) lines.push({ left, right, y });
         }
+        if (lines.length) result.set(anchor, lines);
       }
     }
   }
@@ -181,7 +193,8 @@ function measure(block: HTMLElement, masking: boolean): Line[] {
 
 export class UnderlineLayer {
   readonly svg = document.createElementNS(SVG, 'svg');
-  private readonly blocks = new Map<HTMLElement, { visible: boolean; dirty: boolean; lines: SVGLineElement[] }>();
+  private readonly blocks = new Map<HTMLElement, BlockState>();
+  private readonly reduceMotion = matchMedia('(prefers-reduced-motion: reduce)');
   private readonly resize: ResizeObserver;
   private readonly intersection: IntersectionObserver;
   private readonly events = new AbortController();
@@ -231,7 +244,9 @@ export class UnderlineLayer {
   track(block: HTMLElement, hasCloze: boolean) {
     if (!hasCloze) { this.remove(block); return; }
     if (!this.blocks.has(block)) {
-      this.blocks.set(block, { visible: intersects(block.getBoundingClientRect(), viewport()), dirty: true, lines: [] });
+      this.blocks.set(block, {
+        visible: intersects(block.getBoundingClientRect(), viewport()), dirty: true, ready: false, underlines: new Map(),
+      });
       this.resize.observe(block);
       this.intersection.observe(block);
     }
@@ -250,7 +265,7 @@ export class UnderlineLayer {
   private remove(block: HTMLElement) {
     const state = this.blocks.get(block);
     if (!state) return;
-    state.lines.forEach(line => line.remove());
+    for (const anchor of state.underlines.keys()) this.removeUnderline(state, anchor);
     this.resize.unobserve(block);
     this.intersection.unobserve(block);
     this.blocks.delete(block);
@@ -260,28 +275,85 @@ export class UnderlineLayer {
     for (const block of this.blocks.keys()) if (block.closest('.protyle-wysiwyg') !== this.body) this.remove(block);
   }
 
+  private removeUnderline(state: BlockState, anchor: HTMLElement) {
+    const entry = state.underlines.get(anchor);
+    entry?.animation?.cancel();
+    entry?.group.remove();
+    state.underlines.delete(anchor);
+  }
+
+  private setShown(state: BlockState, anchor: HTMLElement, underline: Underline, shown: boolean) {
+    if (underline.shown === shown && (shown || underline.animation)) return;
+    // 快速切换时，从画面当前的不透明度继续，不跳回动画的起点。
+    const from = underline.animation ? Number(getComputedStyle(underline.group).opacity) : Number(underline.shown);
+    underline.animation?.cancel();
+    underline.animation = undefined;
+    underline.shown = shown;
+    underline.group.style.opacity = shown ? '1' : '0';
+    if (!state.ready || this.reduceMotion.matches || typeof underline.group.animate !== 'function' || from === Number(shown)) {
+      if (!shown) this.removeUnderline(state, anchor);
+      return;
+    }
+    const animation = underline.group.animate([{ opacity: from }, { opacity: Number(shown) }], {
+      duration: FADE_MS, easing: 'ease-in-out',
+    });
+    underline.animation = animation;
+    animation.onfinish = () => {
+      if (underline.animation !== animation) return;
+      underline.animation = undefined;
+      if (!underline.shown) this.removeUnderline(state, anchor);
+    };
+  }
+
   private render = () => {
     this.frame = 0;
     this.prune();
     const ctm = this.svg.getScreenCTM()?.inverse();
     if (!ctm || !Number.isFinite(ctm.a)) return;
-    const changed: { state: { lines: SVGLineElement[] }; lines: Line[] }[] = [];
+    const masking = this.masking();
+    const changed: { state: BlockState; visible: boolean; shown: Set<HTMLElement>; lines: Map<HTMLElement, Line[]> }[] = [];
     for (const [block, state] of this.blocks) {
       if (!state.dirty) continue;
       state.dirty = false;
-      changed.push({ state, lines: state.visible && block.getClientRects().length ? measure(block, this.masking()) : [] });
+      const visible = state.visible && block.getClientRects().length > 0;
+      const clusters = visible ? collectClusters(block, block) : [];
+      const shown = new Set<HTMLElement>();
+      const drawn = new Set<HTMLElement[]>();
+      for (const cluster of clusters) {
+        if (!masking || cluster.some(el => el.classList.contains(REVEAL_CLASS) || el.classList.contains(UNVEIL_CLASS))) shown.add(cluster[0]);
+        // 淡出期间仍测量位置，滚动时虚线继续跟着文字移动。
+        if (shown.has(cluster[0]) || state.underlines.has(cluster[0])) drawn.add(cluster);
+      }
+      changed.push({ state, visible, shown, lines: measure(block, clusters, drawn) });
     }
-    // 完成所有布局读取后再写 SVG。
-    for (const { state, lines } of changed) {
-      while (state.lines.length > lines.length) state.lines.pop()!.remove();
-      lines.forEach(({left, right, y}, i) => {
-        let line = state.lines[i];
-        if (!line) { line = document.createElementNS(SVG, 'line'); state.lines.push(line); this.svg.append(line); }
-        const a = new DOMPoint(left, y).matrixTransform(ctm);
-        const b = new DOMPoint(right, y).matrixTransform(ctm);
-        line.setAttribute('x1', String(a.x)); line.setAttribute('y1', String(a.y));
-        line.setAttribute('x2', String(b.x)); line.setAttribute('y2', String(b.y));
-      });
+    // 先统一读取正文几何，再更新各处挖空的 SVG。
+    for (const { state, visible, shown, lines } of changed) {
+      for (const anchor of state.underlines.keys()) if (!lines.has(anchor)) this.removeUnderline(state, anchor);
+      for (const [anchor, segments] of lines) {
+        let underline = state.underlines.get(anchor);
+        if (!underline) {
+          if (!shown.has(anchor)) continue;
+          const group = document.createElementNS(SVG, 'g');
+          underline = { group, lines: [], shown: false };
+          state.underlines.set(anchor, underline);
+          this.svg.append(group);
+        }
+        while (underline.lines.length > segments.length) underline.lines.pop()!.remove();
+        segments.forEach(({ left, right, y }, i) => {
+          let line = underline.lines[i];
+          if (!line) {
+            line = document.createElementNS(SVG, 'line');
+            underline.lines.push(line);
+            underline.group.append(line);
+          }
+          const a = new DOMPoint(left, y).matrixTransform(ctm);
+          const b = new DOMPoint(right, y).matrixTransform(ctm);
+          line.setAttribute('x1', String(a.x)); line.setAttribute('y1', String(a.y));
+          line.setAttribute('x2', String(b.x)); line.setAttribute('y2', String(b.y));
+        });
+        this.setShown(state, anchor, underline, shown.has(anchor));
+      }
+      state.ready = visible;
     }
   };
 
@@ -290,6 +362,9 @@ export class UnderlineLayer {
     this.resize.disconnect();
     this.intersection.disconnect();
     this.events.abort();
+    for (const state of this.blocks.values()) {
+      for (const anchor of state.underlines.keys()) this.removeUnderline(state, anchor);
+    }
     this.blocks.clear();
     this.svg.remove();
     this.body.classList.remove('sy-cloze-editor');

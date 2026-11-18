@@ -154,6 +154,31 @@ test('findClustersInRange：一次返回选区内的全部遮罩簇', () => {
   assert.equal(clusters[1][0], block.children[1]);
 });
 
+test('findClustersInRange：两块间的选区不检查相邻的无关块', () => {
+  const body = document.createElement('div');
+  body.className = 'protyle-wysiwyg';
+  const blocks = Array.from({ length: 200 }, (_, i) => parseBlock('<span data-type="kbd">' + i + '</span>'));
+  body.append(...blocks);
+  const range = document.createRange();
+  range.setStart(blocks[100].firstChild.firstChild, 0);
+  range.setEnd(blocks[101].firstChild.firstChild, 1);
+  const intersects = range.intersectsNode.bind(range);
+  const checked = [];
+  range.intersectsNode = node => {
+    if (node.nodeType === Node.ELEMENT_NODE && node.matches(KBD_SELECTOR)) checked.push(node.textContent);
+    return intersects(node);
+  };
+  assert.deepEqual(findClustersInRange(range, body).map(cluster => cluster[0].textContent), ['100', '101']);
+  assert.deepEqual(checked, ['100', '101']);
+});
+
+test('findClustersInRange：选区只包含中间公式时仍选中整簇', () => {
+  const block = parseBlock('<span data-type="kbd">A</span><span data-type="inline-math">x</span><span data-type="kbd">B</span>');
+  const range = document.createRange();
+  range.selectNode(block.children[1]);
+  assert.deepEqual(findClustersInRange(range, block), [[...block.children]]);
+});
+
 test('findClustersInRange：选区不碰遮罩时返回空数组', () => {
   const block = parseBlock(kbd('1') + ' 2 ' + kbd('3'));
   const range = document.createRange();

@@ -218,11 +218,45 @@ export const findKbdInRange = (range: Range, block: Element | null): HTMLElement
     findClustersInRange(range, block)[0]?.find(isKbd) || null;
 };
 
-/** 选中夹在切片间的公式时也命中整簇。 */
+/** 只看选区经过的 DOM 分支；选中夹在切片间的公式也要命中整簇。 */
 export const findClustersInRange = (range: Range, scope: ParentNode | null): HTMLElement[][] => {
   const body = resolveClozeBody(range.startContainer);
-  return collectClusters(scope || document).filter(cluster => cluster.some(el =>
-    (!body || resolveClozeBody(el) === body) && range.intersectsNode(el)));
+  const boundary = (scope || document) as Node;
+  const common = range.commonAncestorContainer;
+  const startNode = boundary.contains(common) ? common : boundary;
+  if (startNode !== common && (!common.contains(startNode) || !range.intersectsNode(startNode))) return [];
+
+  const seen = new Set<HTMLElement>();
+  const clusters: HTMLElement[][] = [];
+  const add = (node: Node) => {
+    const anchor = resolveClozeAnchor(node);
+    if (!anchor || seen.has(anchor) || !boundary.contains(anchor) || (body && resolveClozeBody(anchor) !== body)) return;
+    const cluster = getClozeCluster(anchor);
+    cluster.forEach(el => seen.add(el));
+    if (cluster.some(el => range.intersectsNode(el))) clusters.push(cluster);
+  };
+
+  // 共同祖先可能本身就是遮罩或在遮罩内部，不能只看它的子节点。
+  add(startNode);
+  if (!startNode.hasChildNodes()) return clusters;
+  const path = (end: Node) => {
+    const byParent = new Map<Node, Node>();
+    for (let child = end; child !== startNode && child.parentNode; child = child.parentNode) byParent.set(child.parentNode, child);
+    return byParent;
+  };
+  const from = path(range.startContainer);
+  const to = path(range.endContainer);
+  const scan = (node: Node) => {
+    if (node.nodeType === Node.TEXT_NODE) return;
+    if (isKbd(node) || isMath(node)) { add(node); return; }
+    if (node !== startNode && body && resolveElement(node)?.matches(BODY_SELECTOR)) return;
+    const first = node === range.startContainer ? node.childNodes[range.startOffset] : from.get(node) ?? node.firstChild;
+    const lastBranch = to.get(node);
+    const stop = node === range.endContainer ? node.childNodes[range.endOffset] : lastBranch?.nextSibling;
+    for (let child = first; child && child !== stop; child = child.nextSibling) scan(child);
+  };
+  scan(startNode);
+  return clusters;
 };
 
 /* ==========================================================================

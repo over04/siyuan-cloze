@@ -13,7 +13,7 @@ const css = sass.compile('src/index.scss').css;
 const { outputFiles: [bundle] } = await build({
   stdin: { contents: 'export { default } from "./src/index.ts"', resolveDir: process.cwd() },
   bundle: true, write: false, globalName: 'Cloze', format: 'iife', external: ['siyuan'],
-  banner: { js:     "function require() { return { Plugin: class { i18n = {}; eventBus = { on() {}, off() {} }; addIcons() {} addTopBar() {} addCommand(cmd) { (this.commands ??= []).push(cmd); } loadData() { return window.saved; } async saveData(key, data) { if (window.rejectSave) throw Error('save failed'); window.writes.push([key, data]); } }, Setting: class { constructor(opts) { this.options = opts; } addItem(item) { this.item = item; } }, showMessage() {}, getActiveEditor() {} }; }" },
+  banner: { js:     "function require() { return { Plugin: class { i18n = {}; eventBus = { on() {}, off() {} }; addIcons() {} addTopBar() {} addCommand(cmd) { (this.commands ??= []).push(cmd); } loadData() { return window.saved; } async saveData(key, data) { if (window.rejectSave) throw Error('save failed'); window.writes.push([key, data]); } }, Setting: class { constructor(opts) { this.options = opts; } addItem(item) { this.item = item; } }, showMessage(message) { window.messages.push(message); }, getActiveEditor() {} }; }" },
 });
 
 export const deep = String.raw`\begin{matrix}a&b\\c&d\\e&f\\g&h\end{matrix}`;
@@ -46,6 +46,7 @@ export async function mount(browser, html, opts = {}) {
     document.body.innerHTML = html;
     window.saved = { defaultHide: hide };
     window.writes = [];
+    window.messages = [];
   }, {html, hide: opts.hide ?? false});
   await page.evaluate(() => document.fonts.ready.then(() => true));
   if (opts.before) await opts.before(page);

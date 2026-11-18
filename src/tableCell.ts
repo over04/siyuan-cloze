@@ -1,43 +1,34 @@
-/**
- * 表格单元格退避的纯函数层。
- *
- * 背景：思源把单元格点开编辑时，openTableCellRichEditor 会用
- * cell.replaceChildren(host) 把 td 整体换成独立的 ProtyleLite，单元格内随即
- * 出现带 data-node-id 的段落块——但那是**临时块，没有持久 ID**（思源在
- * protyle/util/selection.ts 的撤销恢复里明确写着「单元格内部块没有持久 ID」）。
- *
- * 此时若沿用外层文档 protyle 的 setInlineMark，事务会落到那个临时块上，
- * 内核直接 `Transaction failed: block not found` 并回滚：前端 DOM 看着像
- * 加上了 kbd，数据却没落库。实测（SiYuan 3.8.6）复现路径与结论一致。
- *
- * 退避思路：先把单元格编辑器提交掉（finish），等 td 回到可事务化形态，
- * 再按「可见文本偏移」重建选区重执行。本文件只放这一步所需的纯计算，
- * 零依赖（仅用 DOM 标准对象），便于 tests/ 用 jsdom 直接单测。
- */
+import { resolveClozeBlock, resolveClozeBody, resolveElement } from './cluster.ts';
 
 export const CELL_EDITOR_SELECTOR = '.table__cell-editor';
 export const CELL_SELECTOR = 'td, th';
 export const RICH_CELL_ATTRIBUTE = 'data-sy-table-cell-rich';
 
-/**
- * 单元格编辑态下承载正文的容器。
- *
- * 退避前内容挂在这里，退避后则由 td 直接承载，两者的可见文本才是同一个东西；
- * 拿整个 td 去算偏移会被编辑器外壳（表格控件按钮等）的文本带偏。
- */
-export const CELL_CONTENT_SELECTOR = '.protyle-wysiwyg';
+export const closestTableCell = (node: Node | null): HTMLTableCellElement | null =>
+  resolveElement(node)?.closest<HTMLTableCellElement>(CELL_SELECTOR) ?? null;
+
+/** 一段选区可覆盖单元格里的多个段落或列表项。每个原生格式操作只接收一个正文块。 */
+export function cellEditableRanges(body: HTMLElement, range: Range): { block: HTMLElement; range: Range }[] {
+  const ranges: { block: HTMLElement; range: Range }[] = [];
+  for (const content of body.querySelectorAll<HTMLElement>('[contenteditable="true"]')) {
+    if (resolveClozeBody(content) !== body || !range.intersectsNode(content)) continue;
+    const block = resolveClozeBlock(content);
+    if (!block || !body.contains(block) || block.dataset.type === 'NodeCodeBlock') continue;
+    const segment = content.ownerDocument.createRange();
+    segment.selectNodeContents(content);
+    if (range.comparePoint(segment.startContainer, segment.startOffset) < 0) segment.setStart(range.startContainer, range.startOffset);
+    if (range.comparePoint(segment.endContainer, segment.endOffset) > 0) segment.setEnd(range.endContainer, range.endOffset);
+    if (!segment.collapsed || content.contains(range.startContainer)) ranges.push({ block, range: segment });
+  }
+  return ranges;
+}
 
 /** 思源在行内元素边界写入的零宽字符（ZWSP / WordJoiner / ZWNBSP）。 */
 const ZERO_WIDTH_CHARS = '\u200b\u2060\ufeff';
 
 export const isZeroWidth = (ch: string): boolean => ZERO_WIDTH_CHARS.indexOf(ch) !== -1;
 
-/**
- * 可见文本：剔除零宽字符。
- *
- * 偏移必须锚在用户看得见的文字上——退避前后思源会重建 td，零宽字符的数量
- * 与位置都会漂移，把它们计入偏移会让恢复出来的选区整体跑偏。
- */
+/** 去掉思源为行内标记插入的零宽字符。 */
 export const visibleText = (value: string): string => {
   let out = '';
   for (const ch of value) {
@@ -56,72 +47,6 @@ export const closestCellEditor = (node: Node | null): HTMLElement | null => {
 /** 单元格是否已是 rich 形态：复杂内容已持久化，外层事务不适用。 */
 export const isRichCell = (cell: Element | null): boolean =>
   Boolean(cell && cell.hasAttribute(RICH_CELL_ATTRIBUTE));
-
-/** 深度优先收集元素内的文本节点。不用 TreeWalker，免得依赖 NodeFilter 全局。 */
-const collectTextNodes = (el: Element, out: Text[] = []): Text[] => {
-  el.childNodes.forEach((child) => {
-    if (child.nodeType === Node.TEXT_NODE) {
-      out.push(child as Text);
-    } else if (child.nodeType === Node.ELEMENT_NODE) {
-      collectTextNodes(child as Element, out);
-    }
-  });
-  return out;
-};
-
-/**
- * 把 (node, offset) 折算成相对 el 起点的「可见文本偏移」。
- * 节点不在 el 内、或 el 为空导致 Range 无法建立时返回 -1。
- */
-export const getVisibleOffset = (el: Element, node: Node, offset: number): number => {
-  if (el !== node && !el.contains(node)) return -1;
-
-  const probe = document.createRange();
-  try {
-    probe.setStart(el, 0);
-    probe.setEnd(node, offset);
-  } catch {
-    return -1;
-  }
-  return visibleText(probe.toString()).length;
-};
-
-/**
- * 按可见文本偏移在 el 内重建 Range。
- * 偏移越界、或端点无法落位时返回 null——调用方据此如实提示，不做兜底猜测。
- */
-export const createRangeByVisibleOffset = (
-  el: Element,
-  start: number,
-  end: number,
-): Range | null => {
-  if (start < 0 || end < start) return null;
-
-  const texts = collectTextNodes(el);
-  const locate = (target: number): { node: Text; offset: number } | null => {
-    let consumed = 0;
-    for (const text of texts) {
-      const raw = text.textContent || '';
-      let visible = 0;
-      for (let i = 0; i < raw.length; i++) {
-        if (consumed + visible === target) return { node: text, offset: i };
-        if (!isZeroWidth(raw[i])) visible += 1;
-      }
-      if (consumed + visible === target) return { node: text, offset: raw.length };
-      consumed += visible;
-    }
-    return null;
-  };
-
-  const from = locate(start);
-  const to = locate(end);
-  if (!from || !to) return null;
-
-  const range = document.createRange();
-  range.setStart(from.node, from.offset);
-  range.setEnd(to.node, to.offset);
-  return range;
-};
 
 /* ==========================================================================
    快捷键：单元格编辑态下的兜底分发
